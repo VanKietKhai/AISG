@@ -3,13 +3,13 @@
         "password": "abc123",
         "max_players": 4,
         "arena": {
-            "width": 800,
-            "height": 600,
+            "width": 2000,
+            "height": 1500,
             "obstacles": [
                 {
                     "x": 200,
                     "y": 200,
-                    "width": 50,
+                    "width": 300,
                     "height": 100
                 },
                 {
@@ -25,8 +25,8 @@
         "password": "abc456",
         "max_players": 4,
         "arena": {
-            "width": 800,
-            "height": 600,
+            "width": 2000,
+            "height": 1500,
             "obstacles": [
                 {
                     "x": 400,
@@ -47,8 +47,8 @@
         "password": "abc789",
         "max_players": 4,
         "arena": {
-            "width": 800,
-            "height": 600,
+            "width": 2000,
+            "height": 1500,
             "obstacles": [
                 {
                     "x": 400,
