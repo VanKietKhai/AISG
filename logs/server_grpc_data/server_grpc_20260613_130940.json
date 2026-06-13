@@ -1,0 +1,37 @@
+[
+{
+  "timestamp": "2026-06-13T13:10:51.093963",
+  "timestamp_ms": 1781331051093,
+  "type": "bot_registration",
+  "player_id": "player001",
+  "data": {
+    "bot_name": "player001",
+    "bot_id": 0,
+    "success": false,
+    "message": "❌ Room ID 'room_001' does not exist. Available: ['room_default']"
+  }
+},
+{
+  "timestamp": "2026-06-13T13:12:25.339056",
+  "timestamp_ms": 1781331145339,
+  "type": "bot_registration",
+  "player_id": "player1",
+  "data": {
+    "bot_name": "PLAYER",
+    "bot_id": 0,
+    "success": false,
+    "message": "❌ Room ID 'room_001' does not exist. Available: ['room_default']"
+  }
+},
+{
+  "timestamp": "2026-06-13T13:14:20.937000",
+  "timestamp_ms": 1781331260937,
+  "type": "bot_registration",
+  "player_id": "player001",
+  "data": {
+    "bot_name": "player001",
+    "bot_id": 0,
+    "success": false,
+    "message": "❌ Room ID 'room_001' does not exist. Available: ['room_default']"
+  }
+}
