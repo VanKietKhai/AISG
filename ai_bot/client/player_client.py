@@ -70,6 +70,8 @@ class PlayerClient:
                     thrust=arena_pb2.Vec2(x=x, y=y),
                     aim_angle=self._aim_angle,
                     fire=bool(space),
+                    bot_id=getattr(self, "bot_id", 0),
+                    session_token=getattr(self, "session_token", ""),
                 )
                 await action_queue.put(action)
                 await asyncio.sleep(1/60.0)
@@ -97,6 +99,8 @@ class PlayerClient:
         resp = await stub.RegisterBot(registration)
         if not resp.success:
             raise RuntimeError(f"Register failed: {resp.message}")
+        self.bot_id = resp.bot_id
+        self.session_token = resp.session_token
         print(f"✅ Joined as {self.bot_name} in room {self.room_id}. Server assigned bot_id={resp.bot_id}")
 
         action_queue = asyncio.Queue()

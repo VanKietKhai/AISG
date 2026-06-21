@@ -1,0 +1,2 @@
+"""AISG automated tests."""
+

@@ -180,11 +180,29 @@ class HMoeModel(BaseAIModel):
         self.nav = _NavCNN()
         self.eva = _EvaPPO()
         self.combat = _CombatYOLO()
+        self.run_mode = "EVAL"
+        self.optimizer_step_count = 0
+        self._sync_expert_state()
+
+    @staticmethod
+    def _enemy_present(obs: Dict[str, Any]) -> bool:
+        enemy = obs.get("enemy_pos")
+        if not isinstance(enemy, dict) or float(obs.get("enemy_hp", 0.0)) <= 0:
+            return False
+        return abs(float(enemy.get("x", 0.0))) + abs(float(enemy.get("y", 0.0))) > 1e-6
+
+    def _sync_expert_state(self):
+        learning = getattr(self, "learning", {})
+        step = int(getattr(self, "steps_since_spawn", 0))
+        for expert in (getattr(self, "nav", None), getattr(self, "eva", None), getattr(self, "combat", None)):
+            if expert is not None:
+                expert.learning = learning
+                expert.steps_since_spawn = step
 
     def _context(self, obs: Dict[str, Any]) -> Dict[str, float]:
         sx, sy = float(obs.get("self_pos", {"x":0,"y":0})["x"]), float(obs.get("self_pos", {"x":0,"y":0})["y"])
         enemy = obs.get("enemy_pos")
-        if enemy is not None:
+        if self._enemy_present(obs):
             ex, ey = float(enemy.get("x", 0.0)), float(enemy.get("y", 0.0))
             d_enemy = math.hypot(ex - sx, ey - sy)
         else:
@@ -195,10 +213,90 @@ class HMoeModel(BaseAIModel):
             bx, by = float(b.get("x", 0.0)), float(b.get("y", 0.0))
             vx, vy = float(b.get("vx", 0.0)), float(b.get("vy", 0.0))
             rx, ry = sx - bx, sy - by
-            vproj = (vx*rx + vy*ry) / (math.hypot(vx, vy) + 1e-6)
-            t = (math.hypot(rx, ry) / (abs(vproj) + 1e-3)) if vproj > 0 else 1e9
+            bullet_distance = math.hypot(rx, ry)
+            bullet_speed = math.hypot(vx, vy)
+            if bullet_speed > 1e-3:
+                vproj = (vx*rx + vy*ry) / bullet_speed
+                t = (bullet_distance / (abs(vproj) + 1e-3)) if vproj > 0 else 1e9
+            else:
+                # Current protobuf carries bullet positions only. Use a
+                # conservative proximity estimate until velocity is exposed.
+                t = bullet_distance / 400.0 if bullet_distance < 300.0 else 1e9
             if t < tti_min: tti_min = t
         return {"d_enemy": d_enemy, "tti_min": tti_min}
+
+    def _apply_weapon_policy(self, obs: Dict[str, Any], action: Dict[str, Any], distance: float):
+        """Apply weapon-specific spacing and fire discipline to expert output."""
+        if not self._enemy_present(obs):
+            action["fire"] = False
+            return action
+
+        sx = float(obs.get("self_pos", {}).get("x", 0.0))
+        sy = float(obs.get("self_pos", {}).get("y", 0.0))
+        enemy = obs["enemy_pos"]
+        rx = float(enemy.get("x", 0.0)) - sx
+        ry = float(enemy.get("y", 0.0)) - sy
+        length = math.hypot(rx, ry) or 1.0
+        toward_x, toward_y = rx / length, ry / length
+        strafe_x, strafe_y = -toward_y, toward_x
+
+        weapon = str(obs.get("weapon_type", "AR") or "AR").upper()
+        max_range = max(1.0, float(obs.get("weapon_max_range", 420.0) or 420.0))
+        has_los = bool(obs.get("has_line_of_sight", False))
+        ammo = int(obs.get("ammo", 0))
+        is_reloading = bool(obs.get("is_reloading", False))
+        cooldown = float(obs.get("shot_cooldown_remaining", 0.0))
+        bloom = float(obs.get("current_bloom", 0.0))
+        in_range = bool(obs.get("in_effective_range", distance < max_range))
+        can_shoot = bool(obs.get("can_shoot", ammo > 0 and not is_reloading and cooldown <= 1e-4))
+
+        if weapon == "SNIPER":
+            if distance < 260.0:
+                move_x, move_y = -0.85 * toward_x, -0.85 * toward_y
+            elif distance > min(480.0, max_range * 0.8):
+                move_x, move_y = 0.45 * toward_x, 0.45 * toward_y
+            else:
+                move_x, move_y = 0.42 * strafe_x, 0.42 * strafe_y
+            bloom_limit = 2.2
+        elif weapon == "SMG":
+            desired = min(95.0, max_range * 0.75)
+            if distance > desired:
+                move_x, move_y = 0.92 * toward_x, 0.92 * toward_y
+            else:
+                move_x, move_y = 0.62 * strafe_x, 0.62 * strafe_y
+            bloom_limit = 3.2
+        else:  # AR
+            if distance < 140.0:
+                move_x, move_y = -0.45 * toward_x + 0.35 * strafe_x, -0.45 * toward_y + 0.35 * strafe_y
+            elif distance > min(330.0, max_range * 0.78):
+                move_x, move_y = 0.60 * toward_x, 0.60 * toward_y
+            else:
+                move_x, move_y = 0.52 * strafe_x, 0.52 * strafe_y
+            bloom_limit = 4.0
+
+        magnitude = math.hypot(move_x, move_y)
+        if magnitude > 1.0:
+            move_x, move_y = move_x / magnitude, move_y / magnitude
+        action["move_x"] = float(move_x)
+        action["move_y"] = float(move_y)
+        action["fire"] = bool(
+            has_los
+            and in_range
+            and ammo > 0
+            and not is_reloading
+            and cooldown <= 1e-4
+            and can_shoot
+            and bloom <= bloom_limit
+        )
+        action["weapon_tactic"] = weapon
+        action["target_distance"] = float(distance)
+        action["fire_diagnostic"] = {
+            "has_los": has_los,
+            "in_effective_range": in_range,
+            "can_shoot": can_shoot,
+            "bloom_ok": bloom <= bloom_limit,
+        }
+        return action
     def process(self, observation: Dict[str, Any]) -> Dict[str, Any]:
         """
         HMoe không cần tiền xử lý — trả về nguyên dict.
@@ -210,18 +308,20 @@ class HMoeModel(BaseAIModel):
         obs = observation if isinstance(observation, dict) else {}
         self._last_obs = obs
         self.steps_since_spawn = getattr(self, "steps_since_spawn", 0) + 1
+        self._sync_expert_state()
 
         ctx = self._context(obs)
         d, tti = ctx["d_enemy"], ctx["tti_min"]
 
         # Gating rules:
         #   imminent bullet -> Evasion, close enemy -> Combat, else -> Navigation
-        if tti < 80.0:
+        if tti < 0.35:
             a = self.eva.act(obs)
         elif d < 240.0:
             a = self.combat.act(obs)
         else:
             a = self.nav.act(obs)
+        a = self._apply_weapon_policy(obs, a, d)
         # Failsafe: nếu output gần như 0 -> cưỡng bức wander để không đứng yên
         dx = float(a.get("move_x", 0.0))
         dy = float(a.get("move_y", 0.0))
@@ -266,20 +366,23 @@ class HMoeModel(BaseAIModel):
 
     def learn_from_experience(self, experience_data):
         """Lightweight online update: adjust dodge/strafe after death/survival."""
+        if getattr(self, "run_mode", "EVAL") == "EVAL":
+            return False
         # Expect dict with keys like 'event': 'death' or 'kill', 'accuracy', 'wall_hits'
         if not isinstance(experience_data, dict):
             return False
         ev = experience_data.get('event')
         self.learning = getattr(self, 'learning', {})
         if ev == 'death':
-            self.learning['strafe_amp'] = float(self.learning.get('strafe_amp', 0.6)) * 1.05
-            self.learning['dodge_bias'] = float(self.learning.get('dodge_bias', 0.5)) * 1.05
+            self.learning['strafe_amp'] = min(1.0, float(self.learning.get('strafe_amp', 0.6)) * 1.05)
+            self.learning['dodge_bias'] = min(1.0, float(self.learning.get('dodge_bias', 0.5)) * 1.05)
         elif ev == 'kill':
             self.learning['strafe_amp'] = float(self.learning.get('strafe_amp', 0.6)) * 0.98
         if 'aim_error' in experience_data:
             corr = float(self.learning.get('aim_correction', 0.0))
             self.learning['aim_correction'] = corr * 0.9 + 0.1 * (-experience_data['aim_error'])
         self.update_count = getattr(self, 'update_count', 0) + 1
+        self._sync_expert_state()
         return True
 
     def save_model(self, filepath: str) -> bool:
@@ -290,6 +393,8 @@ class HMoeModel(BaseAIModel):
                 'model_name': 'HMoeModel',
                 'learning': getattr(self, 'learning', {}),
                 'update_count': getattr(self, 'update_count', 0),
+                'run_mode': getattr(self, 'run_mode', 'EVAL'),
+                'optimizer_step_count': getattr(self, 'optimizer_step_count', 0),
             }
             torch.save(ckpt, filepath)
             return True
@@ -305,6 +410,9 @@ class HMoeModel(BaseAIModel):
             ckpt = torch.load(filepath, map_location='cpu')
             self.learning = ckpt.get('learning', {})
             self.update_count = ckpt.get('update_count', 0)
+            self.run_mode = ckpt.get('run_mode', 'EVAL')
+            self.optimizer_step_count = ckpt.get('optimizer_step_count', 0)
+            self._sync_expert_state()
             return True
         except Exception:
             return False

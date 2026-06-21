@@ -193,7 +193,27 @@ def observation_to_dict(observation) -> Dict[str, Any]:
         "walls": list(observation.walls),
         "has_line_of_sight": observation.has_line_of_sight,
         "arena_width": observation.arena_width,
-        "arena_height": observation.arena_height
+        "arena_height": observation.arena_height,
+        "weapon_type": observation.weapon_type,
+        "ammo": observation.ammo,
+        "magazine_size": observation.magazine_size,
+        "is_reloading": observation.is_reloading,
+        "reload_progress": observation.reload_progress,
+        "shot_cooldown_remaining": observation.shot_cooldown_remaining,
+        "current_bloom": observation.current_bloom,
+        "weapon_config_version": observation.weapon_config_version,
+        "weapon_base_damage": observation.weapon_base_damage,
+        "weapon_max_range": observation.weapon_max_range,
+        "weapon_shots_per_second": observation.weapon_shots_per_second,
+        "weapon_mobility_multiplier": observation.weapon_mobility_multiplier,
+        "self_kills": observation.self_kills,
+        "self_deaths": observation.self_deaths,
+        "reload_time_remaining": observation.reload_time_remaining,
+        "target_distance": observation.target_distance,
+        "in_effective_range": observation.in_effective_range,
+        "can_shoot": observation.can_shoot,
+        "last_shot_elapsed": observation.last_shot_elapsed,
+        "run_mode": observation.run_mode,
     }
 
 def action_to_dict(action) -> Dict[str, Any]:
@@ -204,5 +224,6 @@ def action_to_dict(action) -> Dict[str, Any]:
             "y": action.thrust.y
         },
         "aim_angle": action.aim_angle,
-        "fire": action.fire
+        "fire": action.fire,
+        "bot_id": action.bot_id,
     }

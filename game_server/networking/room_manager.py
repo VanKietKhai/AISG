@@ -15,6 +15,7 @@ class Player:
     bot_name: str
     connection_time: float = field(default_factory=time.time)
     bot_id: Optional[int] = None
+    weapon_type: str = "AR"
 
 @dataclass 
 class Room:
@@ -23,6 +24,7 @@ class Room:
     password: str
     max_players: int
     arena_config: dict
+    weapon_loadout_cycle: List[str] = field(default_factory=lambda: ["AR", "SNIPER", "SMG"])
     players: List[Player] = field(default_factory=list)
     created_time: float = field(default_factory=time.time)
 
@@ -30,7 +32,7 @@ class RoomManager:
     """Room-based system replacing matchmaking"""
     _global_bot_id = 1
 
-    def __init__(self, rooms_config_path: str = "arena_battle_game/rooms.json"):
+    def __init__(self, rooms_config_path: str = "rooms.json"):
         self.rooms_config_path = rooms_config_path
         self.rooms: Dict[str, Room] = {}
         self.player_to_room: Dict[str, str] = {}
@@ -44,13 +46,9 @@ class RoomManager:
     def _load_rooms_config(self):
         """Load rooms from JSON config file - FIXED PATH RESOLUTION"""
         try:
-            # ✅ FIX: Tìm file từ project root
-            current_file = os.path.abspath(__file__)
-            current_dir = os.path.dirname(current_file)
-            
-            # Đi từ game_server/networking/room_manager.py -> project root
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-            config_path = os.path.join(project_root, self.rooms_config_path)
+            project_root = Path(__file__).resolve().parents[2]
+            requested_path = Path(self.rooms_config_path)
+            config_path = requested_path if requested_path.is_absolute() else project_root / requested_path
             
             if not os.path.exists(config_path):
                 logger.error(f"❌ rooms.json not found at {config_path}")
@@ -65,7 +63,10 @@ class RoomManager:
                     id=room_id,
                     password=room_config['password'],
                     max_players=room_config['max_players'],
-                    arena_config=room_config['arena']
+                    arena_config=room_config['arena'],
+                    weapon_loadout_cycle=self._validate_loadout_cycle(
+                        room_config.get('weapon_loadout_cycle')
+                    ),
                 )
                 self.rooms[room_id] = room
                 
@@ -85,6 +86,7 @@ class RoomManager:
             "room_default": {
                 "password": "default123",
                 "max_players": 4,
+                "weapon_loadout_cycle": ["AR", "SNIPER", "SMG"],
                 "arena": {
                     "width": 800,
                     "height": 600,
@@ -101,12 +103,22 @@ class RoomManager:
                 id=room_id,
                 password=room_config['password'],
                 max_players=room_config['max_players'],
-                arena_config=room_config['arena']
+                arena_config=room_config['arena'],
+                weapon_loadout_cycle=self._validate_loadout_cycle(
+                    room_config.get('weapon_loadout_cycle')
+                ),
             )
             self.rooms[room_id] = room
             logger.info(f"📋 Created default room: {room_id}")
     
-    # Rest of the methods remain the same...
+    @staticmethod
+    def _validate_loadout_cycle(raw_cycle) -> List[str]:
+        allowed = {"SNIPER", "AR", "SMG"}
+        cycle = [str(value).upper() for value in (raw_cycle or ["AR", "SNIPER", "SMG"])]
+        if not cycle or any(value not in allowed for value in cycle):
+            raise ValueError("weapon_loadout_cycle must contain only SNIPER, AR or SMG")
+        return cycle
+
     def join_room(self, player_id: str, bot_name: str, room_id: str, room_password: str) -> Dict:
         """Join a specific room with password"""
         
@@ -145,8 +157,9 @@ class RoomManager:
                 'bot_id': 0
             }
         
-        # Join room
-        player = Player(id=player_id, bot_name=bot_name)
+        # Server assigns loadouts deterministically by join order.
+        weapon_type = room.weapon_loadout_cycle[len(room.players) % len(room.weapon_loadout_cycle)]
+        player = Player(id=player_id, bot_name=bot_name, weapon_type=weapon_type)
         room.players.append(player)
         self.player_to_room[player_id] = room_id
         self.total_players_served += 1
@@ -163,9 +176,10 @@ class RoomManager:
         else:
             status_msg += " - ⏳ Waiting for more players..."
         
-        # Debug arena config being returned
         obstacle_count = len(room.arena_config.get('obstacles', []))
-        print(f"🎯 ROOM_MANAGER: Returning arena config with {obstacle_count} obstacles for room {room_id}")
+        logger.debug(
+            f"Room {room_id} returns {obstacle_count} obstacles and weapon {weapon_type}"
+        )
         
         logger.info(f"👤 {player_id} → Room {room_id} ({players_count}/{room.max_players})")
         
@@ -175,7 +189,8 @@ class RoomManager:
             'bot_id': bot_id,
             'message': status_msg,
             'players_in_room': players_count,
-            'arena_config': room.arena_config 
+            'arena_config': room.arena_config,
+            'weapon_type': weapon_type,
         }
     
     def _generate_bot_id(self, player: Player, room: Room) -> int:
@@ -212,6 +227,7 @@ class RoomManager:
                     'id': p.id,
                     'name': p.bot_name,
                     'bot_id': p.bot_id,
+                    'weapon_type': p.weapon_type,
                     'connected_time': time.time() - p.connection_time
                 }
                 for p in room.players
@@ -232,6 +248,7 @@ class RoomManager:
                 'players': len(room.players),
                 'max_players': room.max_players,
                 'is_active': len(room.players) >= 2,
+                'weapon_loadout_cycle': list(room.weapon_loadout_cycle),
                 'player_names': [p.bot_name for p in room.players]
             })
         return rooms_list
