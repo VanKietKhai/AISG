@@ -101,6 +101,10 @@ class BotClient:
             
             self.bot_id = response.bot_id
             logger.info(f"✅ Combat bot registered with ID: {self.bot_id}")
+            logger.info(
+                f"🔫 Loadout: {response.weapon_type} "
+                f"(config {response.weapon_config_version})"
+            )
             logger.info(f"🧠 Features: Wall avoidance, Smart aiming, Auto-save")
             logger.info(f"📊 Status: {response.message}")
             
@@ -119,7 +123,7 @@ class BotClient:
                 # Cancel auto-save and do final save
                 save_task.cancel()
                 await self._save_model("final_save")
-                
+
         except Exception as e:
             logger.error(f"💥 Connection error: {e}")
         finally:
@@ -242,10 +246,16 @@ class BotClient:
         """Main game loop with smart combat AI"""
         logger.info("🎮 Starting smart PvP combat system...")
         
-        action_queue = asyncio.Queue()
-        
-        # Start action sender
-        sender_task = asyncio.create_task(self._action_sender(action_queue))
+        action_queue = asyncio.Queue(maxsize=2)
+        # Identity handshake and initial neutral intent. Further actions are
+        # produced only from observations, avoiding the old duplicate 60 Hz
+        # neutral stream that diluted movement/fire decisions.
+        await action_queue.put(arena_pb2.Action(
+            thrust=arena_pb2.Vec2(x=0.0, y=0.0),
+            aim_angle=self.last_aim_angle,
+            fire=False,
+            bot_id=self.bot_id,
+        ))
         
         # Start observation receiver
         try:
@@ -254,8 +264,6 @@ class BotClient:
                 
         except Exception as e:
             logger.error(f"💥 Game loop error: {e}")
-        finally:
-            sender_task.cancel()
     
     async def _action_generator(self, action_queue):
         """Generate actions for the server"""
@@ -266,51 +274,9 @@ class BotClient:
         except asyncio.CancelledError:
             pass
     
-    async def _action_sender(self, action_queue):
-        """Action sender with tactical defaults"""
-        try:
-            while True:
-                # Smart default action when AI is not active
-                action = arena_pb2.Action(
-                    thrust=arena_pb2.Vec2(x=0.0, y=0.0),
-                    aim_angle=self.last_aim_angle,  # Maintain last aim
-                    fire=False
-                )
-                
-                await action_queue.put(action)
-                await asyncio.sleep(1/60)  # 60 FPS
-                
-        except asyncio.CancelledError:
-            pass
-    
     async def _process_observation(self, observation, action_queue):
         """Process observation with IMPROVED waiting handling"""
         try:
-            # Check if this is a waiting state (no enemy)
-            if observation.enemy_hp == 0 and observation.enemy_pos.x == 0:
-                if not self.match_active:
-                    # Still waiting for players - STABLE WAITING
-                    if self.waiting_start_time:
-                        wait_time = time.time() - self.waiting_start_time
-                        # Log every 10 seconds instead of continuous spam
-                        if int(wait_time) % 10 == 0 and wait_time > 0:
-                            logger.info(f"⏳ {self.bot_name} waiting for opponents... ({wait_time:.0f}s)")
-                    return  # ← IMPORTANT: Don't disconnect, just wait
-                else:
-                    # Match ended or enemy died
-                    self.match_active = False
-                    logger.info("🏁 Combat engagement ended")
-            else:
-                # Match is active
-                if not self.match_active:
-                    self.match_active = True
-                    if self.waiting_start_time:
-                        wait_time = time.time() - self.waiting_start_time
-                        logger.info(f"⚔️ {self.bot_name} combat engagement started! (waited {wait_time:.1f}s)")
-                        self.waiting_start_time = None
-                    else:
-                        logger.info(f"⚔️ {self.bot_name} joined ongoing combat engagement!")
-         
             # Convert observation to enhanced dict
             obs_dict = {
                 'tick': observation.tick,
@@ -322,13 +288,50 @@ class BotClient:
                 'walls': list(observation.walls),
                 'has_line_of_sight': observation.has_line_of_sight,
                 'arena_width': observation.arena_width,
-                'arena_height': observation.arena_height
+                'arena_height': observation.arena_height,
+                'weapon_type': observation.weapon_type,
+                'ammo': observation.ammo,
+                'magazine_size': observation.magazine_size,
+                'is_reloading': observation.is_reloading,
+                'reload_progress': observation.reload_progress,
+                'shot_cooldown_remaining': observation.shot_cooldown_remaining,
+                'current_bloom': observation.current_bloom,
+                'weapon_config_version': observation.weapon_config_version,
+                'weapon_base_damage': observation.weapon_base_damage,
+                'weapon_max_range': observation.weapon_max_range,
+                'weapon_shots_per_second': observation.weapon_shots_per_second,
+                'weapon_mobility_multiplier': observation.weapon_mobility_multiplier,
+                'self_kills': observation.self_kills,
+                'self_deaths': observation.self_deaths,
+                'reload_time_remaining': observation.reload_time_remaining,
+                'target_distance': observation.target_distance,
+                'in_effective_range': observation.in_effective_range,
+                'can_shoot': observation.can_shoot,
+                'last_shot_elapsed': observation.last_shot_elapsed,
+                'run_mode': observation.run_mode or 'EVAL',
             }
+            enemy_missing = observation.enemy_hp == 0 and observation.enemy_pos.x == 0
+            if enemy_missing:
+                if not self.match_active:
+                    if self.waiting_start_time:
+                        wait_time = time.time() - self.waiting_start_time
+                        if int(wait_time) % 10 == 0 and wait_time > 0:
+                            logger.info(f"⏳ {self.bot_name} waiting for opponents... ({wait_time:.0f}s)")
+                    return
+                self.match_active = False
+                logger.info("🏁 Combat engagement ended")
+            elif not self.match_active:
+                self.match_active = True
+                if self.waiting_start_time:
+                    wait_time = time.time() - self.waiting_start_time
+                    logger.info(f"⚔️ {self.bot_name} combat engagement started! (waited {wait_time:.1f}s)")
+                    self.waiting_start_time = None
+                else:
+                    logger.info(f"⚔️ {self.bot_name} joined ongoing combat engagement!")
             
             # Only generate AI actions if match is active
             if self.match_active:
                 # Process observation for enhanced AI
-                processed_obs = obs_dict  # HMoe nhận dict trực tiếp
                 hm = self.model.act(obs_dict)
                 move_x = float(hm.get('move_x', 0.0))
                 move_y = float(hm.get('move_y', 0.0))
@@ -358,36 +361,36 @@ class BotClient:
                 action = arena_pb2.Action(
                     thrust=arena_pb2.Vec2(x=move_x, y=move_y),
                     aim_angle=enhanced_aim,
-                    fire=enhanced_fire
+                    fire=enhanced_fire,
+                    bot_id=self.bot_id,
                 )
                 
                 # Store for next iteration
                 self.last_aim_angle = enhanced_aim
                 
                 # Calculate enhanced reward
-                reward = self._calculate_reward(obs_dict, move_x, move_y, enhanced_fire)
-                
-                # Check if episode ended (bot died)
+                reward = self._calculate_reward(
+                    obs_dict, move_x, move_y, enhanced_fire
+                )
+
+                # Preserve the existing episode lifecycle.
                 done = obs_dict['self_hp'] <= 0
-                
                 if done:
                     self.deaths += 1
                     logger.info(f"💀 {self.bot_name} eliminated! Episode reward: {self.episode_reward:.2f}")
                     logger.info(f"📊 Combat stats: {self.kills}K/{self.deaths}D (K/D: {self.kills/max(self.deaths,1):.2f})")
                     logger.info(f"🎯 Firing accuracy: {self.shots_hit}/{self.shots_fired} ({self.shots_hit/max(self.shots_fired,1)*100:.1f}%)")
-                    
-                    # Auto-save on death if significant progress
-                    if self.episode_count % 10 == 0:  # Every 10 deaths
+                    if self.episode_count % 10 == 0:
                         await self._save_model("auto_death")
-                    
                     self._reset_episode_stats()
                 else:
                     self.last_hp = obs_dict['self_hp']
                     self.last_enemy_hp = obs_dict['enemy_hp']
-                
+
                 self.episode_reward += reward
+
                 self.last_obs = obs_dict
-                
+
                 # Send enhanced action to game
                 await action_queue.put(action)
             else:
@@ -395,13 +398,14 @@ class BotClient:
                 neutral_action = arena_pb2.Action(
                     thrust=arena_pb2.Vec2(x=0.0, y=0.0),
                     aim_angle=0.0,
-                    fire=False
+                    fire=False,
+                    bot_id=self.bot_id,
                 )
                 await action_queue.put(neutral_action)
             
         except Exception as e:
             logger.error(f"💥 Observation processing error: {e}")
-    
+
     def _enhance_wall_avoidance(self, move_x, move_y, obs_dict):
         """Enhanced wall avoidance system"""
         self_pos = obs_dict['self_pos']
@@ -582,6 +586,11 @@ class BotClient:
         self_pos = obs_dict['self_pos']
         has_line_of_sight = obs_dict['has_line_of_sight']
         enemy_hp = obs_dict['enemy_hp']
+        if (not should_fire or obs_dict.get('ammo', 0) <= 0
+                or obs_dict.get('is_reloading', False)
+                or obs_dict.get('shot_cooldown_remaining', 0.0) > 1e-4
+                or not obs_dict.get('can_shoot', True)):
+            return False
         
         # Don't fire if no enemy
         if enemy_pos['x'] == 0 and enemy_pos['y'] == 0:
@@ -603,7 +612,7 @@ class BotClient:
         # Firing decision criteria
         fire_conditions = {
             'has_line_of_sight': has_line_of_sight,
-            'in_range': 50 < distance < 500,  # Not too close, not too far
+            'in_range': bool(obs_dict.get('in_effective_range', distance < obs_dict.get('weapon_max_range', 500))),
             'good_aim': aim_error < 0.3,  # Aim within ~17 degrees
             'enemy_alive': enemy_hp > 0,
             'ai_wants_fire': should_fire
@@ -614,13 +623,14 @@ class BotClient:
             fire_conditions['has_line_of_sight'],
             fire_conditions['in_range'],
             fire_conditions['good_aim'],
-            fire_conditions['enemy_alive']
+            fire_conditions['enemy_alive'],
+            fire_conditions['ai_wants_fire'],
         ])
         
         # Special cases
         if distance < 100 and has_line_of_sight:
             # Close range - fire even with poor aim
-            should_fire_enhanced = True
+            should_fire_enhanced = should_fire
             logger.debug(f"🔥 {self.bot_name} close range engagement (dist: {distance:.1f})")
         elif distance > 400:
             # Long range - require very good aim
@@ -641,14 +651,13 @@ class BotClient:
         # Core combat rewards
         current_hp = obs_dict['self_hp']
         if current_hp <= 0 and self.last_hp > 0:
-            reward = -100.0  # Death penalty
+            reward = -100.0
             logger.info(f"💀 {self.bot_name} death penalty: {reward}")
-        
+
         enemy_hp = obs_dict['enemy_hp']
         if enemy_hp <= 0 and hasattr(self, 'last_enemy_hp') and self.last_enemy_hp > 0:
-            reward = +100.0  # Kill reward
+            reward = +100.0
             self.kills += 1
-            # Bonus accuracy tracking
             if self.shots_fired > 0:
                 self.shots_hit += 1
             logger.info(f"🎯 {self.bot_name} elimination! Reward: {reward} (Total kills: {self.kills})")

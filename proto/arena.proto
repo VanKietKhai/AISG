@@ -27,6 +27,26 @@ message Observation {
   bool has_line_of_sight = 8;         // Can see enemy directly
   float arena_width = 9;              // Arena boundaries
   float arena_height = 10;
+  string weapon_type = 11;            // SNIPER, AR, or SMG
+  uint32 ammo = 12;                   // Current magazine ammo
+  uint32 magazine_size = 13;
+  bool is_reloading = 14;
+  float reload_progress = 15;         // 0..1 while reloading
+  float shot_cooldown_remaining = 16; // Simulation seconds
+  float current_bloom = 17;           // Degrees
+  string weapon_config_version = 18;
+  float weapon_base_damage = 19;
+  float weapon_max_range = 20;
+  float weapon_shots_per_second = 21;
+  float weapon_mobility_multiplier = 22;
+  uint32 self_kills = 23;
+  uint32 self_deaths = 24;
+  float reload_time_remaining = 25;   // Simulation seconds
+  float target_distance = 26;         // Server-computed distance to selected target
+  bool in_effective_range = 27;       // Target exists and is inside weapon range
+  bool can_shoot = 28;                // Authoritative weapon-state diagnostic
+  float last_shot_elapsed = 29;       // Simulation/wall-clock diagnostic; -1 if never fired
+  string run_mode = 30;               // EVAL or TRAIN; G5 defaults to EVAL
 }
 
 // Action sent from AI bot to game server
@@ -34,6 +54,7 @@ message Action {
   Vec2 thrust = 1;         // Movement vector (-1 to 1)
   float aim_angle = 2;     // Aim direction in radians
   bool fire = 3;           // Whether to shoot
+  int32 bot_id = 4;        // Registered bot identity for stream correlation
 }
 
 // Bot registration message 
@@ -47,6 +68,8 @@ message RegistrationResponse {
   bool success = 1;
   string message = 2;
   int32 bot_id = 3;
+  string weapon_type = 4;
+  string weapon_config_version = 5;
 }
 
 // Game event (death, kill, etc.)

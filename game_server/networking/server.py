@@ -93,7 +93,14 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
             # Create bot in game engine using RoomManager's bot ID
             room_state = self.game_engine.get_or_create_room_state(room_id, room_result['arena_config'])
             bot_id = room_result['bot_id']  # Use the ID from RoomManager instead
-            room_state.add_bot(player_id, actual_bot_name, room_result['arena_config'], room_id, bot_id)
+            room_state.add_bot(
+                player_id,
+                actual_bot_name,
+                room_result['arena_config'],
+                room_id,
+                bot_id,
+                weapon_type=room_result['weapon_type'],
+            )
             players_count = room_result['players_in_room']
             max_players = room_result.get('max_players', 4)  # fallback to 4
             
@@ -112,6 +119,9 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                     "player_id": player_id,
                     "bot_id": bot_id,
                     "bot_name": actual_bot_name,
+                    "weapon_type": room_result['weapon_type'],
+                    "weapon_config_version": room_state.weapon_config_version,
+                    "match_seed": room_state.match_seed,
                     "players_in_room": room_result['players_in_room'],
                     "room_id": room_result['room_id']
                 })
@@ -124,7 +134,9 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
             return arena_pb2.RegistrationResponse(
                 success=True,
                 message=status_msg,
-                bot_id=room_result['bot_id']
+                bot_id=room_result['bot_id'],
+                weapon_type=room_result['weapon_type'],
+                weapon_config_version=room_state.weapon_config_version,
             )
             
         except Exception as e:
@@ -148,14 +160,21 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
         bot_connection = None
         
         try:
-            # Find available bot and establish connection
+            try:
+                first_action = await request_iterator.__anext__()
+            except StopAsyncIteration:
+                logger.warning("⚠️ PlayGame stream closed before identity handshake")
+                return
+
+            requested_bot_id = first_action.bot_id
             bot_id = None
             player_id = None
 
-            # First, find which player needs connection by checking all room states
             for room_id, room_state in self.game_engine.room_states.items():
                 for bid, bot in room_state.bots.items():
-                    if bid not in self.connections:
+                    identity_matches = requested_bot_id > 0 and bid == requested_bot_id
+                    legacy_candidate = requested_bot_id <= 0
+                    if (identity_matches or legacy_candidate) and bid not in self.connections:
                         bot_id = bid
                         player_id = bot.player_id
                         break
@@ -163,9 +182,9 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                     break
             
             if bot_id is None:
-                logger.error("⚠️ No available bot for PlayGame connection")
+                logger.error(f"⚠️ No available bot for PlayGame identity {requested_bot_id}")
                 return
-            
+
             # Get room info
             player_room_id = self.room_manager.player_to_room.get(player_id, "")
             room_info = self.room_manager.get_room_info(player_room_id)
@@ -204,6 +223,7 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
             
             # Process actions from client với logging
             try:
+                await self._process_action_with_logging(first_action, bot_id, player_id)
                 async for action_request in request_iterator:
                     await self._process_action_with_logging(action_request, bot_id, player_id)
                     bot_connection.last_action_time = asyncio.get_event_loop().time()
@@ -232,16 +252,19 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
     async def _process_action_with_logging(self, action_request, bot_id: int, player_id: str):
         """Process action với JSON logging"""
         try:
+            connection = self.connections.get(bot_id)
+            if not connection or action_request.bot_id not in (0, bot_id):
+                logger.warning(
+                    f"⚠️ Ignoring action for bot {action_request.bot_id} on stream {bot_id}"
+                )
+                return
+
             # Log received action
             if self.json_logger:
                 action_dict = action_to_dict(action_request)
                 self.json_logger.log_action_received(bot_id, player_id, action_dict)
             
             # Check if bot's room is active
-            connection = self.connections.get(bot_id)
-            if not connection:
-                return
-
             player_room_id = self.room_manager.player_to_room.get(connection.player_id, "")
             room_info = self.room_manager.get_room_info(player_room_id)
 
@@ -286,6 +309,21 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                     # ACTIVE COMBAT - Send real observations
                     room_state = self.game_engine.get_room_state(player_room_id)
                     if room_state:
+                        if self.json_logger:
+                            for weapon_event in room_state.drain_weapon_events():
+                                event_data = dict(weapon_event)
+                                event_type = event_data.pop('event_type')
+                                related_bots = [
+                                    event_data[key]
+                                    for key in ('shooter_id', 'victim_id')
+                                    if key in event_data
+                                ]
+                                self.json_logger.log_game_event(
+                                    event_type,
+                                    event_data,
+                                    related_bots=related_bots,
+                                )
+
                         obs_data = room_state.get_observation(connection.bot_id)
                         
                         if obs_data:
@@ -297,14 +335,40 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                                 enemy_hp=obs_data['enemy_hp'],
                                 has_line_of_sight=obs_data['has_line_of_sight'],
                                 arena_width=obs_data['arena_width'],
-                                arena_height=obs_data['arena_height']
+                                arena_height=obs_data['arena_height'],
+                                weapon_type=obs_data['weapon_type'],
+                                ammo=obs_data['ammo'],
+                                magazine_size=obs_data['magazine_size'],
+                                is_reloading=obs_data['is_reloading'],
+                                reload_progress=obs_data['reload_progress'],
+                                shot_cooldown_remaining=obs_data['shot_cooldown_remaining'],
+                                current_bloom=obs_data['current_bloom'],
+                                weapon_config_version=obs_data['weapon_config_version'],
+                                weapon_base_damage=obs_data['weapon_base_damage'],
+                                weapon_max_range=obs_data['weapon_max_range'],
+                                weapon_shots_per_second=obs_data['weapon_shots_per_second'],
+                                weapon_mobility_multiplier=obs_data['weapon_mobility_multiplier'],
+                                self_kills=obs_data['self_kills'],
+                                self_deaths=obs_data['self_deaths'],
+                                reload_time_remaining=obs_data['reload_time_remaining'],
+                                target_distance=obs_data['target_distance'],
+                                in_effective_range=obs_data['in_effective_range'],
+                                can_shoot=obs_data['can_shoot'],
+                                last_shot_elapsed=obs_data['last_shot_elapsed'],
+                                run_mode=obs_data['run_mode'],
                             )
                             
                             # Add bullets and walls
                             for bullet in obs_data['bullets']:
                                 observation.bullets.append(arena_pb2.Vec2(x=bullet['x'], y=bullet['y']))
                             observation.walls.extend(obs_data['walls'])
-                            
+
+                            if self.json_logger:
+                                self.json_logger.log_observation_sent(
+                                    connection.bot_id,
+                                    connection.player_id,
+                                    observation_to_dict(observation),
+                                )
                             await context.write(observation)
                             
                 else:
@@ -316,15 +380,40 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                         logger.info(f"⏳ {connection.player_id} waiting in {player_room_id} ({player_count}/2 players)")
                     
                     # Send stable waiting observation
+                    room_state = self.game_engine.get_room_state(player_room_id)
+                    waiting_data = room_state.get_observation(connection.bot_id) if room_state else {}
                     waiting_obs = arena_pb2.Observation(
                         tick=observation_count,
-                        self_pos=arena_pb2.Vec2(x=400.0, y=300.0),  # Center position
-                        self_hp=100.0,  # Full health
+                        self_pos=arena_pb2.Vec2(
+                            x=waiting_data.get('self_pos', {}).get('x', 400.0),
+                            y=waiting_data.get('self_pos', {}).get('y', 300.0),
+                        ),
+                        self_hp=waiting_data.get('self_hp', 100.0),
                         enemy_pos=arena_pb2.Vec2(x=0.0, y=0.0),    # No enemy
                         enemy_hp=0.0,   # No enemy
                         has_line_of_sight=False,
-                        arena_width=800.0,
-                        arena_height=600.0
+                        arena_width=waiting_data.get('arena_width', 800.0),
+                        arena_height=waiting_data.get('arena_height', 600.0),
+                        weapon_type=waiting_data.get('weapon_type', 'AR'),
+                        ammo=waiting_data.get('ammo', 0),
+                        magazine_size=waiting_data.get('magazine_size', 0),
+                        is_reloading=waiting_data.get('is_reloading', False),
+                        reload_progress=waiting_data.get('reload_progress', 0.0),
+                        shot_cooldown_remaining=waiting_data.get('shot_cooldown_remaining', 0.0),
+                        current_bloom=waiting_data.get('current_bloom', 0.0),
+                        weapon_config_version=waiting_data.get('weapon_config_version', ''),
+                        weapon_base_damage=waiting_data.get('weapon_base_damage', 0.0),
+                        weapon_max_range=waiting_data.get('weapon_max_range', 0.0),
+                        weapon_shots_per_second=waiting_data.get('weapon_shots_per_second', 0.0),
+                        weapon_mobility_multiplier=waiting_data.get('weapon_mobility_multiplier', 1.0),
+                        self_kills=waiting_data.get('self_kills', 0),
+                        self_deaths=waiting_data.get('self_deaths', 0),
+                        reload_time_remaining=waiting_data.get('reload_time_remaining', 0.0),
+                        target_distance=0.0,
+                        in_effective_range=False,
+                        can_shoot=waiting_data.get('can_shoot', False),
+                        last_shot_elapsed=waiting_data.get('last_shot_elapsed', -1.0),
+                        run_mode='EVAL',
                     )
                     await context.write(waiting_obs)
                 

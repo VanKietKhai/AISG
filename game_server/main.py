@@ -23,13 +23,15 @@ from game_server.engine.game_state import GameState, Wall
 from game_server.engine.physics import PhysicsEngine
 from game_server.networking.server import run_server
 from game_server.ui.renderer import GameRenderer
+from game_server.weapons import derive_match_seed, load_weapon_config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class GameEngine:
-    def __init__(self):
-        self.game_state = GameState()
+    def __init__(self, weapon_config_path=None):
+        self.weapon_config = load_weapon_config(weapon_config_path)
+        self.game_state = GameState(weapon_config=self.weapon_config)
         self.room_states = {}  
         self.physics_engines = {}  
         self.physics = PhysicsEngine(self.game_state)
@@ -88,8 +90,11 @@ class GameEngine:
             for room_id, room_config in rooms_data.items():
                 
                 # Create new GameState for this room
-                room_state = GameState()
-                room_state.room_id = room_id
+                room_state = GameState(
+                    weapon_config=self.weapon_config,
+                    room_id=room_id,
+                    match_seed=derive_match_seed(room_id, self.weapon_config.version),
+                )
                 
                 # Get arena config
                 arena_config = room_config.get('arena', {})
@@ -135,8 +140,11 @@ class GameEngine:
     def get_or_create_room_state(self, room_id, arena_config=None):
         """Get existing room state or create new one"""
         if room_id not in self.room_states:
-            room_state = GameState()
-            room_state.room_id = room_id
+            room_state = GameState(
+                weapon_config=self.weapon_config,
+                room_id=room_id,
+                match_seed=derive_match_seed(room_id, self.weapon_config.version),
+            )
             if arena_config:
                 room_state._create_arena_walls(arena_config)
             self.room_states[room_id] = room_state
@@ -209,6 +217,8 @@ async def main():
                        help='JSON log file rotation interval in minutes (default: 5)')
     parser.add_argument('--log-dir', default='logs/server_grpc_data',
                        help='Directory for JSON log files')
+    parser.add_argument('--weapon-config', default=None,
+                       help='Path to a versioned weapon config JSON file')
     
     args = parser.parse_args()
     
@@ -224,7 +234,7 @@ async def main():
         log_path.mkdir(parents=True, exist_ok=True)
     
     # Create game engine
-    game_engine = GameEngine()
+    game_engine = GameEngine(args.weapon_config)
     
     # Create renderer if UI enabled
     renderer = None
@@ -244,6 +254,7 @@ async def main():
     logger.info(f"👥 Players required: {args.min_players}-{args.max_players}")
     logger.info(f"🎮 UI enabled: {'Yes' if not args.no_ui else 'No (headless)'}")
     logger.info("⚔️ Mode: PvP Only")
+    logger.info(f"🔫 Weapon config: {game_engine.weapon_config.version}")
     logger.info("🎯 Waiting for AI bots to connect...")
     
     # JSON Logging info
@@ -269,7 +280,9 @@ async def main():
     
     try:
         game_task = asyncio.create_task(game_engine.run())
-        server_task = asyncio.create_task(run_server(game_engine, args.port, enable_logging=enable_logging))
+        server_task = asyncio.create_task(run_server(
+            game_engine, args.port, enable_logging=enable_logging
+        ))
 
         # Wait a moment for server to be ready
         await asyncio.sleep(0.5)

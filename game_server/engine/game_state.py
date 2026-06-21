@@ -2,9 +2,11 @@
 import numpy as np
 import time
 import math
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from enum import Enum
+
+from ..weapons import WeaponConfigSnapshot, WeaponRuntimeState, load_weapon_config
 
 class BotState(Enum):
     ALIVE = "alive"
@@ -31,6 +33,8 @@ class Bot:
     invulnerable_until: float = 0.0
     radius: float = 15.0
     room_id: str = None
+    weapon_type: str = "AR"
+    weapon_state: Optional[WeaponRuntimeState] = None
 
 @dataclass
 class Bullet:
@@ -43,6 +47,12 @@ class Bullet:
     damage: float = 25.0
     radius: float = 3.0
     created_time: float = 0.0
+    weapon_type: str = "AR"
+    max_range: float = 1000.0
+    distance_travelled: float = 0.0
+    previous_x: float = 0.0
+    previous_y: float = 0.0
+    range_exhausted: bool = False
 
 @dataclass
 class Wall:
@@ -54,7 +64,12 @@ class Wall:
 class GameState:
     """Manages the complete game state"""
     
-    def __init__(self):
+    def __init__(
+        self,
+        weapon_config: Optional[WeaponConfigSnapshot] = None,
+        room_id: Optional[str] = None,
+        match_seed: int = 0,
+    ):
         self.width = 800
         self.height = 600
         self.bots: Dict[int, Bot] = {}
@@ -70,13 +85,23 @@ class GameState:
         self.total_kills = 0
         self.total_deaths = 0
         self.total_bullets_fired = 0
+        self.weapon_events: List[dict] = []
         
         # Initialize walls
         self._create_arena_walls()
-        self.room_id = None
+        self.room_id = room_id
+        self.weapon_config = weapon_config or load_weapon_config()
+        self.weapon_config_version = self.weapon_config.version
+        self.match_seed = int(match_seed)
     
     def _create_arena_walls(self, arena_config: dict = None):
         """Create arena walls and room-specific obstacles"""
+        if arena_config:
+            self.width = int(arena_config.get('width', self.width))
+            self.height = int(arena_config.get('height', self.height))
+            if self.width <= 0 or self.height <= 0:
+                raise ValueError("arena width and height must be positive")
+
         wall_thickness = 20
         
         # Boundary walls (luôn giống nhau)
@@ -100,7 +125,19 @@ class GameState:
                 Wall(center_x - 15, center_y - 80, 30, 160),   # Vertical center
         ])
     
-    def add_bot(self, player_id: str, name: str, arena_config: dict = None, room_id: str = None, custom_bot_id: int = None) -> int:
+    def add_bot(
+        self,
+        player_id: str,
+        name: str,
+        arena_config: dict = None,
+        room_id: str = None,
+        custom_bot_id: int = None,
+        weapon_type: str = "AR",
+    ) -> int:
+        if arena_config and len(self.bots) == 0:
+            self._create_arena_walls(arena_config)
+            self.room_id = room_id
+
         if custom_bot_id is not None:
             bot_id = custom_bot_id
         else:
@@ -110,24 +147,20 @@ class GameState:
         # Find valid spawn position
         spawn_x, spawn_y = self._find_spawn_position()
         
+        weapon_definition = self.weapon_config.get(weapon_type)
         bot = Bot(
             id=bot_id,
             player_id=player_id,
             name=name,
             x=spawn_x,
-            y=spawn_y
+            y=spawn_y,
+            room_id=room_id,
+            weapon_type=weapon_definition.key,
+            weapon_state=self.weapon_config.create_runtime(weapon_definition.key),
         )
-        
-        # Store room info in bot
-        bot.room_id = room_id  # Add this line
-        
+
         self.bots[bot_id] = bot
-        
-        # Update arena walls if room-specific config provided
-        if arena_config and len(self.bots) == 0:
-            self._create_arena_walls(arena_config)
-            self.room_id = room_id  # Track room for this state
-        
+
         return bot_id
     
     def _find_spawn_position(self) -> tuple:
@@ -183,7 +216,17 @@ class GameState:
         if bot_id in self.bots:
             del self.bots[bot_id]
     
-    def add_bullet(self, shooter_id: int, x: float, y: float, vel_x: float, vel_y: float) -> int:
+    def add_bullet(
+        self,
+        shooter_id: int,
+        x: float,
+        y: float,
+        vel_x: float,
+        vel_y: float,
+        damage: float = 25.0,
+        weapon_type: str = "AR",
+        max_range: float = 1000.0,
+    ) -> int:
         """Add a new bullet"""
         bullet_id = self.next_bullet_id
         self.next_bullet_id += 1
@@ -195,7 +238,12 @@ class GameState:
             y=y,
             vel_x=vel_x,
             vel_y=vel_y,
-            created_time=time.time()
+            damage=damage,
+            created_time=time.time(),
+            weapon_type=weapon_type,
+            max_range=max_range,
+            previous_x=x,
+            previous_y=y,
         )
         
         self.bullets.append(bullet)
@@ -206,6 +254,21 @@ class GameState:
         """Remove a bullet from the game"""
         if bullet in self.bullets:
             self.bullets.remove(bullet)
+
+    def record_weapon_event(self, event_type: str, **data):
+        self.weapon_events.append({
+            'event_type': event_type,
+            'tick': self.tick,
+            'room_id': self.room_id,
+            'weapon_config_version': self.weapon_config_version,
+            'match_seed': self.match_seed,
+            **data,
+        })
+
+    def drain_weapon_events(self) -> List[dict]:
+        events = self.weapon_events
+        self.weapon_events = []
+        return events
     
     def get_observation(self, bot_id: int) -> dict:
         """Get observation for a specific bot"""
@@ -221,12 +284,14 @@ class GameState:
         enemy_pos = (0, 0)
         enemy_hp = 0
         has_line_of_sight = False
+        target_distance = 0.0
         
         if enemies:
             closest_enemy = min(enemies, 
                 key=lambda e: math.sqrt((e.x - bot.x)**2 + (e.y - bot.y)**2))
             enemy_pos = (closest_enemy.x, closest_enemy.y)
             enemy_hp = closest_enemy.hp
+            target_distance = math.hypot(closest_enemy.x - bot.x, closest_enemy.y - bot.y)
             has_line_of_sight = self._has_line_of_sight(
                 (bot.x, bot.y), (closest_enemy.x, closest_enemy.y)
             )
@@ -245,6 +310,9 @@ class GameState:
         for wall in self.walls:
             wall_data.extend([wall.x, wall.y, wall.width, wall.height])
         
+        weapon_definition = self.weapon_config.get(bot.weapon_type)
+        weapon_state = bot.weapon_state
+
         return {
             'tick': self.tick,
             'self_pos': {'x': bot.x, 'y': bot.y},
@@ -255,7 +323,27 @@ class GameState:
             'walls': wall_data,
             'has_line_of_sight': has_line_of_sight,
             'arena_width': self.width,
-            'arena_height': self.height
+            'arena_height': self.height,
+            'weapon_type': bot.weapon_type,
+            'ammo': weapon_state.ammo,
+            'magazine_size': weapon_definition.magazine,
+            'is_reloading': weapon_state.is_reloading,
+            'reload_progress': weapon_state.reload_progress(weapon_definition),
+            'shot_cooldown_remaining': weapon_state.cooldown_remaining,
+            'current_bloom': weapon_state.current_bloom_degrees,
+            'weapon_config_version': self.weapon_config_version,
+            'weapon_base_damage': weapon_definition.base_damage,
+            'weapon_max_range': weapon_definition.max_range,
+            'weapon_shots_per_second': weapon_definition.shots_per_second,
+            'weapon_mobility_multiplier': weapon_definition.speed_multiplier,
+            'self_kills': bot.kills,
+            'self_deaths': bot.deaths,
+            'reload_time_remaining': weapon_state.reload_remaining,
+            'target_distance': target_distance,
+            'in_effective_range': bool(enemies and target_distance <= weapon_definition.max_range),
+            'can_shoot': weapon_state.can_fire(),
+            'last_shot_elapsed': -1.0 if bot.last_shot_time <= 0 else max(0.0, time.time() - bot.last_shot_time),
+            'run_mode': 'EVAL',
         }
     
     def _has_line_of_sight(self, start: tuple, end: tuple) -> bool:
