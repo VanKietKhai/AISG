@@ -182,12 +182,16 @@ class GameEngine:
             for room_id, room_state in self.room_states.items():
                 total_bots = len(room_state.bots)
                 alive_bots = len(room_state.get_alive_bots())
-                
-                if total_bots >= 2:
-                    # Active room - full physics
+                active_teams = {
+                    (bot.team_id or bot.player_id)
+                    for bot in room_state.bots.values()
+                }
+
+                if total_bots >= 2 and len(active_teams) >= 2:
+                    # Active room - full team-vs-team physics
                     self.physics_engines[room_id].update(min(dt, 0.1))
                 elif total_bots > 0:
-                    # Waiting room - slow physics
+                    # Waiting room - slow physics so cooldown/reload state stays stable
                     self.physics_engines[room_id].update(min(dt, 0.1) * 0.1)
             
             # Control game speed - MUST yield control to other tasks

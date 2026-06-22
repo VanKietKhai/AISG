@@ -1,36 +1,36 @@
 {
-  "schema_version": 1,
-  "version": "weapon-v1",
-  "defaults": {
-    "bloom_recovery_degrees_per_second": 6.0
-  },
-  "weapons": {
-    "SNIPER": {
-      "damage": 10,
-      "fire_rate": 1,
-      "range": 10,
-      "mobility": 3,
-      "bloom_recoil": 10,
-      "magazine": 5,
-      "reload_seconds": 2.5
+    "schema_version": 1,
+    "version": "weapon-v3-three-role-teams",
+    "defaults": {
+        "bloom_recovery_degrees_per_second": 6.0
     },
-    "AR": {
-      "damage": 4,
-      "fire_rate": 7,
-      "range": 7,
-      "mobility": 5,
-      "bloom_recoil": 8,
-      "magazine": 30,
-      "reload_seconds": 2.0
-    },
-    "SMG": {
-      "damage": 3,
-      "fire_rate": 10,
-      "range": 2,
-      "mobility": 9,
-      "bloom_recoil": 3,
-      "magazine": 30,
-      "reload_seconds": 1.6
+    "weapons": {
+        "SNIPER": {
+            "damage": 10,
+            "fire_rate": 1,
+            "range": 10,
+            "mobility": 3,
+            "bloom_recoil": 10,
+            "magazine": 5,
+            "reload_seconds": 2.5
+        },
+        "AR": {
+            "damage": 4,
+            "fire_rate": 7,
+            "range": 7,
+            "mobility": 5,
+            "bloom_recoil": 8,
+            "magazine": 30,
+            "reload_seconds": 2.0
+        },
+        "SMG": {
+            "damage": 3,
+            "fire_rate": 10,
+            "range": 2,
+            "mobility": 9,
+            "bloom_recoil": 3,
+            "magazine": 30,
+            "reload_seconds": 1.6
+        }
     }
-  }
 }

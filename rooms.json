@@ -1,8 +1,12 @@
 {
     "room_001": {
         "password": "abc123",
-        "max_players": 4,
-        "weapon_loadout_cycle": ["AR", "SNIPER", "SMG"],
+        "max_players": 8,
+        "weapon_loadout_cycle": [
+            "AR",
+            "SNIPER",
+            "SMG"
+        ],
         "arena": {
             "width": 2000,
             "height": 1500,
@@ -24,8 +28,12 @@
     },
     "room_002": {
         "password": "abc456",
-        "max_players": 4,
-        "weapon_loadout_cycle": ["SMG", "AR", "SNIPER"],
+        "max_players": 8,
+        "weapon_loadout_cycle": [
+            "SMG",
+            "AR",
+            "SNIPER"
+        ],
         "arena": {
             "width": 2000,
             "height": 1500,
@@ -47,8 +55,12 @@
     },
     "room_003": {
         "password": "abc789",
-        "max_players": 4,
-        "weapon_loadout_cycle": ["SNIPER", "SMG", "AR"],
+        "max_players": 8,
+        "weapon_loadout_cycle": [
+            "SNIPER",
+            "SMG",
+            "AR"
+        ],
         "arena": {
             "width": 2000,
             "height": 1500,

@@ -19,7 +19,7 @@ class WeaponConfigTests(unittest.TestCase):
         cls.config = load_weapon_config()
 
     def test_required_weapon_baseline_and_version(self):
-        self.assertEqual(self.config.version, "weapon-v1")
+        self.assertEqual(self.config.version, "weapon-v3-three-role-teams")
         self.assertEqual(set(self.config.keys()), {"SNIPER", "AR", "SMG"})
         self.assertEqual(self.config.get("SNIPER").magazine, 5)
         self.assertEqual(self.config.get("AR").magazine, 30)
@@ -69,6 +69,23 @@ class RoomLoadoutTests(unittest.TestCase):
         self.assertEqual(first["weapon_type"], "AR")
         self.assertEqual(second["weapon_type"], "SNIPER")
         self.assertEqual(third["weapon_type"], "SMG")
+
+    def test_team_room_waits_for_two_distinct_teams(self):
+        manager = RoomManager()
+        first = manager.join_room("team-a-1", "a1", "room_002", "abc456", team_id="team-a", requested_weapon_type="SMG")
+        second = manager.join_room("team-a-2", "a2", "room_002", "abc456", team_id="team-a", requested_weapon_type="AR")
+        room_info = manager.get_room_info("room_002")
+
+        self.assertTrue(first["success"])
+        self.assertTrue(second["success"])
+        self.assertEqual(first["team_id"], "team-a")
+        self.assertEqual(second["weapon_type"], "AR")
+        self.assertEqual(room_info["team_count"], 1)
+        self.assertFalse(room_info["is_active"])
+
+        third = manager.join_room("team-b-1", "b1", "room_002", "abc456", team_id="team-b", requested_weapon_type="AR")
+        self.assertTrue(third["success"])
+        self.assertTrue(manager.get_room_info("room_002")["is_active"])
 
 
 class WeaponPhysicsTests(unittest.TestCase):
@@ -154,8 +171,23 @@ class WeaponPhysicsTests(unittest.TestCase):
         self.assertEqual(state.bullets, [])
         event_types = [event["event_type"] for event in state.weapon_events]
         self.assertEqual(event_types, ["shot_fired", "hit_registered"])
-        self.assertEqual(state.weapon_events[-1]["weapon_config_version"], "weapon-v1")
+        self.assertEqual(state.weapon_events[-1]["weapon_config_version"], "weapon-v3-three-role-teams")
         self.assertAlmostEqual(state.weapon_events[-1]["damage"], expected_damage)
+
+    def test_same_team_bullets_do_not_damage_friendly_bots(self):
+        state = self.make_state()
+        state.add_bot("member-1", "ally-shooter", custom_bot_id=1, weapon_type="AR", team_id="team-a")
+        state.add_bot("member-2", "ally-target", custom_bot_id=2, weapon_type="SMG", team_id="team-a")
+        shooter = state.bots[1]
+        target = state.bots[2]
+        shooter.x, shooter.y, shooter.aim_angle = 100.0, 100.0, 0.0
+        target.x, target.y = 180.0, 100.0
+
+        physics = PhysicsEngine(state)
+        physics.apply_bot_action(shooter.id, {"aim_angle": 0.0, "fire": True})
+        physics.update(0.15)
+
+        self.assertEqual(target.hp, 100.0)
 
     def test_mobility_changes_acceleration_and_speed_cap(self):
         sniper_state = self.make_state()
@@ -209,7 +241,7 @@ class WeaponPhysicsTests(unittest.TestCase):
 
         self.assertEqual(observation["weapon_type"], "SMG")
         self.assertEqual(observation["ammo"], 30)
-        self.assertEqual(observation["weapon_config_version"], "weapon-v1")
+        self.assertEqual(observation["weapon_config_version"], "weapon-v3-three-role-teams")
         self.assertEqual(observation["weapon_max_range"], 120.0)
 
         proto = arena_pb2.Observation(

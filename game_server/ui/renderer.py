@@ -38,6 +38,13 @@ class ModernColors:
     BOT_DEAD = (100, 100, 100)
     BOT_INVULNERABLE = (255, 237, 78)
     BOT_INVULNERABLE_GLOW = (255, 237, 78, 150)
+    TEAM_A = (0, 212, 255)
+    TEAM_A_DARK = (0, 110, 180)
+    TEAM_A_GLOW = (0, 212, 255, 95)
+    TEAM_B = (255, 92, 76)
+    TEAM_B_DARK = (180, 52, 48)
+    TEAM_B_GLOW = (255, 92, 76, 95)
+    TEAM_OTHER = (200, 200, 200)
     # Bullet colors
     BULLET_CORE = (255, 237, 78)
     BULLET_GLOW = (255, 136, 0)
@@ -91,16 +98,20 @@ class ModernButton:
 class GameRenderer:
     """Compact game renderer with fixed debug key"""
     def __init__(self, arena_width=800, arena_height=600):
-        # Calculate window size based on arena + UI
-        self.ui_panel_width = 320
-        self.arena_width = arena_width
-        self.arena_height = arena_height
-        # Compact window - just fit the content
-        self.screen_width = self.ui_panel_width + arena_width + 40  # 20px margin on each side
-        self.screen_height = max(arena_height + 100, 700)  # At least 700px height for UI
+        # Window/layout. The actual room map is 2000x1500, so the renderer
+        # scales world coordinates into a visible viewport instead of cropping
+        # the first 800x600 pixels.
+        self.ui_panel_width = 360
+        self.screen_width = 1366
+        self.screen_height = 768
+        self.arena_width = arena_width      # current visible viewport width, updated per frame
+        self.arena_height = arena_height    # current visible viewport height, updated per frame
+        self.world_width = arena_width      # current room/map width, updated per frame
+        self.world_height = arena_height    # current room/map height, updated per frame
+        self.scale = 1.0
         # Layout
-        self.arena_offset_x = self.ui_panel_width + 20
-        self.arena_offset_y = 60
+        self.arena_offset_x = self.ui_panel_width + 24
+        self.arena_offset_y = 66
         # Pygame objects
         self.screen = None
         self.clock = None
@@ -121,15 +132,15 @@ class GameRenderer:
     def _setup_ui_elements(self):
         """Setup UI elements with compact layout"""
         # Speed control buttons - 2x2 grid
-        button_width, button_height = 70, 35
-        start_x, start_y = 25, 130
+        button_width, button_height = 86, 40
+        start_x, start_y = 28, 132
         speeds = [1.0, 2.0, 4.0, 10.0]
         labels = ["1x", "2x", "4x", "10x"]
         for i, (speed, label) in enumerate(zip(speeds, labels)):
             row = i // 2
             col = i % 2
-            x = start_x + col * (button_width + 10)
-            y = start_y + row * (button_height + 8)
+            x = start_x + col * (button_width + 14)
+            y = start_y + row * (button_height + 10)
             button = ModernButton(x, y, button_width, button_height, label, None, active=(speed == 1.0))
             button.speed = speed
             self.speed_buttons.append(button)
@@ -137,11 +148,11 @@ class GameRenderer:
         """Initialize font system"""
         try:
             self.fonts = {
-                'title': pygame.font.Font(None, 28),
-                'subtitle': pygame.font.Font(None, 18),
-                'normal': pygame.font.Font(None, 16),
-                'small': pygame.font.Font(None, 14),
-                'tiny': pygame.font.Font(None, 12),
+                'title': pygame.font.Font(None, 36),
+                'subtitle': pygame.font.Font(None, 23),
+                'normal': pygame.font.Font(None, 20),
+                'small': pygame.font.Font(None, 18),
+                'tiny': pygame.font.Font(None, 15),
             }
             # Update button fonts
             for button in self.speed_buttons:
@@ -149,7 +160,7 @@ class GameRenderer:
         except Exception as e:
             logger.error(f"Font initialization error: {e}")
             # Emergency fallback
-            default_font = pygame.font.Font(None, 16)
+            default_font = pygame.font.Font(None, 18)
             self.fonts = {key: default_font for key in ['title', 'subtitle', 'normal', 'small', 'tiny']}
     async def run(self, game_engine):
         """Main rendering loop"""
@@ -165,6 +176,10 @@ class GameRenderer:
                         self.running = False
                     elif event.type == pygame.KEYDOWN:
                         self._handle_key_press(event.key, game_engine)
+                    elif event.type == pygame.VIDEORESIZE:
+                        self.screen_width = max(1180, event.w)
+                        self.screen_height = max(720, event.h)
+                        self.screen = pygame.display.set_mode((self.screen_width, self.screen_height), pygame.RESIZABLE)
                     elif event.type == pygame.MOUSEBUTTONDOWN:
                         self._handle_mouse_click(event.pos, game_engine)
                     elif event.type == pygame.MOUSEMOTION:
@@ -185,8 +200,8 @@ class GameRenderer:
         try:
             pygame.init()
             # Create compact window
-            self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
-            pygame.display.set_caption("Arena Battle - Compact View")
+            self.screen = pygame.display.set_mode((self.screen_width, self.screen_height), pygame.RESIZABLE)
+            pygame.display.set_caption("Arena Battle - Team View")
             self.clock = pygame.time.Clock()
             # Initialize font system
             self._initialize_fonts()
@@ -215,50 +230,33 @@ class GameRenderer:
             b = int(ModernColors.BACKGROUND_PRIMARY[2] * (1-ratio) + ModernColors.BACKGROUND_SECONDARY[2] * ratio)
             pygame.draw.line(self.screen, (r, g, b), (0, y), (self.screen_width, y))
     def _render_ui_panel(self, game_engine):
-        """Render compact left UI panel"""
-        # Panel background
+        """Render readable left UI panel with team-separated information."""
         panel_rect = pygame.Rect(0, 0, self.ui_panel_width, self.screen_height)
         pygame.draw.rect(self.screen, ModernColors.BACKGROUND_TERTIARY, panel_rect)
-        # Panel border
-        pygame.draw.line(self.screen, ModernColors.NEON_CYAN, 
+        pygame.draw.line(self.screen, ModernColors.NEON_CYAN,
                         (self.ui_panel_width, 0), (self.ui_panel_width, self.screen_height), 2)
-        y_offset = 20
-        # Title
+
+        y_offset = 18
         self._render_title(y_offset)
-        y_offset += 60
-        # PvP mode
-        mode_text = "🔥 PvP Combat Mode"
-        mode_surface = self.fonts['normal'].render(mode_text, True, ModernColors.NEON_PINK)
-        self.screen.blit(mode_surface, (25, y_offset))
-        y_offset += 40
-        # Speed control
-        speed_title = self.fonts['subtitle'].render("⚡ Speed Control", True, ModernColors.NEON_CYAN)
-        self.screen.blit(speed_title, (25, y_offset-20))
-        y_offset += 25
-        # Draw speed buttons
+        y_offset += 58
+
+        mode_surface = self.fonts['normal'].render("PvP Combat Mode", True, ModernColors.NEON_PINK)
+        self.screen.blit(mode_surface, (28, y_offset))
+        y_offset += 38
+
+        speed_title = self.fonts['subtitle'].render("Speed Control", True, ModernColors.NEON_CYAN)
+        self.screen.blit(speed_title, (28, y_offset - 16))
+        y_offset += 28
+
         for button in self.speed_buttons:
             button.draw(self.screen)
-        y_offset += 100
-        # Game statistics
-        self._render_stats(game_engine, y_offset)
-        y_offset += 180
-        
-        # # Room info
-        # room_title = self.fonts['subtitle'].render("🏠 Room Info", True, ModernColors.NEON_CYAN)
-        # self.screen.blit(room_title, (25, y_offset + 5))
-        # y_offset += 25
-        
-        # # Display current room (placeholder)
-        # room_text = f"Current: room_001"
-        # room_surface = self.fonts['small'].render(room_text, True, ModernColors.TEXT_SECONDARY)
-        # self.screen.blit(room_surface, (25, y_offset))
-        # y_offset += 40
-        
-        # Bot list
-        self._render_bot_list(game_engine, y_offset)
-        y_offset += 150
-        # Controls (at bottom)
-        self._render_controls(self.screen_height - 120)
+        y_offset += 104
+
+        y_offset = self._render_stats(game_engine, y_offset)
+        y_offset += 16
+        y_offset = self._render_bot_list(game_engine, y_offset)
+
+        self._render_controls(self.screen_height - 104)
     def _render_title(self, y):
         """Render animated title"""
         title_text = "ARENA BATTLE"
@@ -269,80 +267,187 @@ class GameRenderer:
         title_surface = self.fonts['title'].render(title_text, True, ModernColors.TEXT_PRIMARY)
         title_rect = title_surface.get_rect(center=(self.ui_panel_width//2, y + 20))
         self.screen.blit(title_surface, title_rect)
+    def _get_viewed_bots(self, game_engine):
+        """Return bots from the currently selected room without truncating the team data."""
+        game_state, _ = self._get_viewed_game_state(game_engine)
+        return list(game_state.bots.values())
+
+    def _team_label(self, bot):
+        """Normalize team id into the labels used by the UI."""
+        raw = (getattr(bot, "team_id", None) or getattr(bot, "player_id", None) or "").strip()
+        name = (getattr(bot, "name", "") or "").strip()
+        key = f"{raw} {name}".lower().replace("_", "").replace("-", "")
+        if "teamb" in key or key.endswith(" b") or key == "b":
+            return "Team B"
+        if "teama" in key or key.endswith(" a") or key == "a":
+            return "Team A"
+        if raw:
+            return raw[:1].upper() + raw[1:]
+        return "No Team"
+
+    def _team_color(self, label, fallback_index=0):
+        label_lower = str(label).lower()
+        if "team a" in label_lower or label_lower == "a":
+            return ModernColors.TEAM_A
+        if "team b" in label_lower or label_lower == "b":
+            return ModernColors.TEAM_B
+        return ModernColors.NEON_GREEN if fallback_index % 2 == 0 else ModernColors.NEON_YELLOW
+
+    def _team_glow(self, label):
+        label_lower = str(label).lower()
+        if "team a" in label_lower or label_lower == "a":
+            return ModernColors.TEAM_A_GLOW
+        if "team b" in label_lower or label_lower == "b":
+            return ModernColors.TEAM_B_GLOW
+        return (*ModernColors.TEAM_OTHER[:3], 80)
+
+    def _role_abbr(self, bot):
+        role = (getattr(bot, "weapon_type", None) or getattr(bot, "role", None) or "AR").upper()
+        if role == "SNIPER":
+            return "SNI"
+        if role == "SMG":
+            return "SMG"
+        return "AR"
+
+    def _team_stats(self, bots):
+        grouped = {}
+        for bot in bots:
+            label = self._team_label(bot)
+            if label not in grouped:
+                grouped[label] = {"bots": 0, "alive": 0, "kills": 0, "deaths": 0, "members": []}
+            grouped[label]["bots"] += 1
+            grouped[label]["kills"] += int(getattr(bot, "kills", 0) or 0)
+            grouped[label]["deaths"] += int(getattr(bot, "deaths", 0) or 0)
+            grouped[label]["members"].append(bot)
+            if getattr(bot, "state", None) in [BotState.ALIVE, BotState.INVULNERABLE]:
+                grouped[label]["alive"] += 1
+        for label in ("Team A", "Team B"):
+            grouped.setdefault(label, {"bots": 0, "alive": 0, "kills": 0, "deaths": 0, "members": []})
+        return grouped
+
     def _render_stats(self, game_engine, y):
-        """Render compact statistics"""
-        stats_title = self.fonts['subtitle'].render("📊 Statistics", True, ModernColors.NEON_CYAN)
-        self.screen.blit(stats_title, (25, y))
-        y += 25
-        stats = game_engine.game_state.get_game_stats()
-        # Compact stat display
-        stat_lines = [
+        """Render readable statistics split by Team A and Team B."""
+        stats_title = self.fonts['subtitle'].render("Statistics", True, ModernColors.NEON_CYAN)
+        self.screen.blit(stats_title, (28, y))
+        y += 26
+
+        game_state, _ = self._get_viewed_game_state(game_engine)
+        stats = game_state.get_game_stats()
+        bots = list(game_state.bots.values())
+        team_stats = self._team_stats(bots)
+        team_a = team_stats.get("Team A", {"bots": 0, "alive": 0, "kills": 0, "deaths": 0})
+        team_b = team_stats.get("Team B", {"bots": 0, "alive": 0, "kills": 0, "deaths": 0})
+
+        basic_lines = [
             f"Tick: {stats['tick']:,}",
             f"FPS: {stats['fps']:.1f}",
             f"Speed: {stats['speed_multiplier']}x",
             f"Uptime: {stats['uptime']:.0f}s",
-            "",
-            f"Bots: {stats['total_bots']} ({stats['alive_bots']} alive)",
-            f"Bullets: {stats['active_bullets']}",
-            f"Kills: {stats['total_kills']:,}",
-            f"Deaths: {stats['total_deaths']:,}",
-            f"Shots: {stats['total_bullets_fired']:,}",
+            f"Team A: {team_a['bots']}     Team B: {team_b['bots']}",
         ]
-        for line in stat_lines:
-            if line:  # Skip empty lines
-                line_surface = self.fonts['small'].render(line, True, ModernColors.TEXT_SECONDARY)
-                self.screen.blit(line_surface, (25, y))
-            y += 16
+        for line in basic_lines:
+            line_surface = self.fonts['small'].render(line, True, ModernColors.TEXT_SECONDARY)
+            self.screen.blit(line_surface, (28, y))
+            y += 21
+
+        table_x = 28
+        table_y = y + 3
+        table_w = self.ui_panel_width - 56
+        table_h = 104
+        mid_x = table_x + table_w // 2
+        row_h = 25
+
+        pygame.draw.rect(self.screen, ModernColors.BUTTON_NORMAL, (table_x, table_y, table_w, table_h), border_radius=6)
+        pygame.draw.rect(self.screen, ModernColors.NEON_CYAN, (table_x, table_y, table_w, table_h), width=1, border_radius=6)
+        pygame.draw.line(self.screen, ModernColors.TEXT_SECONDARY, (mid_x, table_y), (mid_x, table_y + table_h), 1)
+        for r in range(1, 4):
+            pygame.draw.line(self.screen, (70, 80, 105), (table_x, table_y + r * row_h), (table_x + table_w, table_y + r * row_h), 1)
+
+        left_header = self.fonts['small'].render("TEAM A", True, ModernColors.TEAM_A)
+        right_header = self.fonts['small'].render("TEAM B", True, ModernColors.TEAM_B)
+        self.screen.blit(left_header, left_header.get_rect(center=(table_x + table_w * 0.25, table_y + 13)))
+        self.screen.blit(right_header, right_header.get_rect(center=(table_x + table_w * 0.75, table_y + 13)))
+
+        rows = [
+            ("Alive", f"{team_a['alive']}/{team_a['bots']}", f"{team_b['alive']}/{team_b['bots']}"),
+            ("Kills", str(team_a['kills']), str(team_b['kills'])),
+            ("Deaths", str(team_a['deaths']), str(team_b['deaths'])),
+        ]
+        for idx, (label, left, right) in enumerate(rows, start=1):
+            cy = table_y + idx * row_h + 13
+            label_surface = self.fonts['tiny'].render(label, True, ModernColors.TEXT_SECONDARY)
+            self.screen.blit(label_surface, (table_x + 8, cy - 7))
+            left_surface = self.fonts['small'].render(left, True, ModernColors.TEXT_PRIMARY)
+            right_surface = self.fonts['small'].render(right, True, ModernColors.TEXT_PRIMARY)
+            self.screen.blit(left_surface, left_surface.get_rect(center=(table_x + table_w * 0.36, cy)))
+            self.screen.blit(right_surface, right_surface.get_rect(center=(table_x + table_w * 0.86, cy)))
+
+        return table_y + table_h
+
     def _render_bot_list(self, game_engine, y):
-        """Render compact bot list"""
-        bots_title = self.fonts['subtitle'].render("🤖 Active Bots", True, ModernColors.NEON_CYAN)
-        self.screen.blit(bots_title, (25, y + 10))
-        y += 25
+        """Render bot list separated by team."""
+        bots_title = self.fonts['subtitle'].render("Active Bots", True, ModernColors.NEON_CYAN)
+        self.screen.blit(bots_title, (28, y))
+        y += 26
 
-        # Get bots from current viewing room
-        if self.viewing_mode != "default":
-            room_state = game_engine.get_room_state(self.viewing_mode)
-            if room_state:
-                bots = list(room_state.bots.values())[:5]
-            else:
-                bots = []
-        else:
-            # Fallback: get bots from first available room
-            available_rooms = list(game_engine.room_states.keys())
-            if available_rooms:
-                first_room = game_engine.room_states[available_rooms[0]]
-                bots = list(first_room.bots.values())[:5]
-            else:
-                bots = []
+        bots = self._get_viewed_bots(game_engine)
+        team_stats = self._team_stats(bots)
+        ordered_labels = ["Team A", "Team B"]
+        for label in sorted(team_stats.keys()):
+            if label not in ordered_labels and team_stats[label]["bots"] > 0:
+                ordered_labels.append(label)
 
-        for bot in bots:
-            # Status color
-            if bot.state == BotState.ALIVE:
-                color = ModernColors.BOT_ALIVE
-                icon = "🟢"
-            elif bot.state == BotState.INVULNERABLE:
-                color = ModernColors.BOT_INVULNERABLE
-                icon = "🟡"
+        max_members_per_team = 4
+        for team_index, label in enumerate(ordered_labels):
+            members = sorted(team_stats[label]["members"], key=lambda b: (getattr(b, "weapon_type", ""), getattr(b, "name", "")))[:max_members_per_team]
+            if not members and label not in ("Team A", "Team B"):
+                continue
+
+            color = self._team_color(label, team_index)
+            header_rect = pygame.Rect(28, y, self.ui_panel_width - 56, 22)
+            pygame.draw.rect(self.screen, (22, 28, 48), header_rect, border_radius=4)
+            pygame.draw.line(self.screen, color, (header_rect.x + 4, header_rect.centery), (header_rect.right - 4, header_rect.centery), 2)
+            header_text = self.fonts['tiny'].render(f" {label} ", True, color)
+            pygame.draw.rect(self.screen, ModernColors.BACKGROUND_TERTIARY, header_text.get_rect(topleft=(header_rect.x + 8, header_rect.y + 3)).inflate(8, 0))
+            self.screen.blit(header_text, (header_rect.x + 12, header_rect.y + 3))
+            y += 26
+
+            if not members:
+                empty_surface = self.fonts['tiny'].render("Waiting for bots...", True, ModernColors.TEXT_SECONDARY)
+                self.screen.blit(empty_surface, (42, y))
+                y += 18
             else:
-                color = ModernColors.BOT_DEAD
-                icon = "🔴"
-            # Bot info
-            bot_name = bot.name if len(bot.name) <= 12 else bot.name[:9] + "..."
-            bot_text = f"{icon} {bot_name}"
-            if bot == self.selected_bot:
-                bot_text = f"► {bot_text}"
-                color = ModernColors.NEON_CYAN
-            bot_surface = self.fonts['small'].render(bot_text, True, color)
-            self.screen.blit(bot_surface, (25, y))
-            # K/D on same line
-            kd_text = f"{bot.kills}K/{bot.deaths}D"
-            kd_surface = self.fonts['tiny'].render(kd_text, True, ModernColors.TEXT_SECONDARY)
-            self.screen.blit(kd_surface, (200, y))
-            y += 18
+                for bot in members:
+                    if bot.state == BotState.ALIVE:
+                        status_color = color
+                        status = "ALV"
+                    elif bot.state == BotState.INVULNERABLE:
+                        status_color = ModernColors.BOT_INVULNERABLE
+                        status = "INV"
+                    else:
+                        status_color = ModernColors.BOT_DEAD
+                        status = "DED"
+
+                    selected_prefix = "> " if bot == self.selected_bot else "  "
+                    role = self._role_abbr(bot)
+                    short_name = bot.name if len(bot.name) <= 16 else bot.name[:13] + "..."
+                    line = f"{selected_prefix}[{role}] {short_name}"
+                    bot_surface = self.fonts['tiny'].render(line, True, status_color)
+                    self.screen.blit(bot_surface, (38, y))
+
+                    kd_text = f"{bot.kills}K/{bot.deaths}D"
+                    kd_surface = self.fonts['tiny'].render(kd_text, True, ModernColors.TEXT_SECONDARY)
+                    self.screen.blit(kd_surface, (self.ui_panel_width - 82, y))
+
+                    status_surface = self.fonts['tiny'].render(status, True, status_color)
+                    self.screen.blit(status_surface, (self.ui_panel_width - 132, y))
+                    y += 19
+            y += 6
+        return y
     def _render_controls(self, y):
         """Render controls section"""
-        controls_title = self.fonts['subtitle'].render("🎮 Controls", True, ModernColors.NEON_CYAN)
-        self.screen.blit(controls_title, (25, y))
+        controls_title = self.fonts['subtitle'].render("Controls", True, ModernColors.NEON_CYAN)
+        self.screen.blit(controls_title, (28, y))
         y += 20
         controls = [
             "1,2,3,4 - Speed",
@@ -354,91 +459,109 @@ class GameRenderer:
         ]
         for control in controls:
             control_surface = self.fonts['tiny'].render(control, True, ModernColors.TEXT_SECONDARY)
-            self.screen.blit(control_surface, (25, y))
-            y += 14
-    def _render_arena(self, game_engine):
-        """Render arena với room selection đúng - FIXED"""
-        
-        # 🔥 FIX: Logic chọn game state
+            self.screen.blit(control_surface, (28, y))
+            y += 15
+    def _get_viewed_game_state(self, game_engine):
+        """Return the room state currently shown by the UI."""
         game_state = None
         room_info = ""
-        
+
         if self.viewing_mode != "default":
-            # Hiển thị room cụ thể
             room_state = game_engine.get_room_state(self.viewing_mode)
             if room_state:
                 game_state = room_state
                 wall_count = len(room_state.walls)
-                obstacle_count = wall_count - 4  # Trừ 4 boundary walls
+                obstacle_count = max(0, wall_count - 4)
                 room_info = f"Room: {self.viewing_mode} ({wall_count} walls, {obstacle_count} obstacles)"
             else:
-                # Fallback nếu không tìm thấy room state
                 game_state = game_engine.game_state
                 room_info = f"Default State (room '{self.viewing_mode}' not found)"
         else:
-            # Fallback to first available room instead of default
             available_rooms = list(game_engine.room_states.keys())
             if available_rooms:
                 fallback_room = available_rooms[0]
                 game_state = game_engine.room_states[fallback_room]
                 wall_count = len(game_state.walls)
-                obstacle_count = wall_count - 4
+                obstacle_count = max(0, wall_count - 4)
                 room_info = f"Viewing: {fallback_room} ({wall_count} walls, {obstacle_count} obstacles)"
             else:
-                # Create empty state for display
                 from game_server.engine.game_state import GameState
                 game_state = GameState()
                 room_info = "No rooms available"
-        
-        # Arena layout
-        arena_rect = pygame.Rect(
-            self.arena_offset_x, 
+        return game_state, room_info
+
+    def _compute_arena_rect(self, game_state):
+        """Fit the full world/map into the current pygame window."""
+        self.world_width = max(1.0, float(getattr(game_state, "width", self.world_width) or self.world_width))
+        self.world_height = max(1.0, float(getattr(game_state, "height", self.world_height) or self.world_height))
+
+        max_display_width = max(320, self.screen_width - self.ui_panel_width - 40)
+        max_display_height = max(240, self.screen_height - self.arena_offset_y - 40)
+        self.scale = min(max_display_width / self.world_width, max_display_height / self.world_height)
+        self.scale = max(0.05, min(self.scale, 1.0))
+
+        self.arena_width = int(self.world_width * self.scale)
+        self.arena_height = int(self.world_height * self.scale)
+
+        return pygame.Rect(
+            self.arena_offset_x,
             self.arena_offset_y,
-            self.arena_width, 
-            self.arena_height
+            self.arena_width,
+            self.arena_height,
         )
-        
-        # Header với room info
-        header_text = f"🏟️ Combat Arena ({self.arena_width}x{self.arena_height})"
+
+    def _world_to_screen(self, x, y, arena_rect):
+        return arena_rect.x + float(x) * self.scale, arena_rect.y + float(y) * self.scale
+
+    def _screen_to_world(self, x, y, arena_rect):
+        return (float(x) - arena_rect.x) / self.scale, (float(y) - arena_rect.y) / self.scale
+
+    def _render_arena(self, game_engine):
+        """Render the selected room scaled to the visible window."""
+        game_state, room_info = self._get_viewed_game_state(game_engine)
+        arena_rect = self._compute_arena_rect(game_state)
+
+        header_text = (
+            f"🏟️ Combat Arena world {int(self.world_width)}x{int(self.world_height)} "
+            f"→ view {self.arena_width}x{self.arena_height} ({self.scale:.2f}x)"
+        )
         header_surface = self.fonts['normal'].render(header_text, True, ModernColors.TEXT_PRIMARY)
         self.screen.blit(header_surface, (self.arena_offset_x, self.arena_offset_y - 30))
-        
-        # Room info detail
+
         room_surface = self.fonts['small'].render(room_info, True, ModernColors.TEXT_SECONDARY)
         self.screen.blit(room_surface, (self.arena_offset_x, self.arena_offset_y - 10))
-        
-        # Arena background
+
         pygame.draw.rect(self.screen, ModernColors.ARENA_BG, arena_rect)
-        
-        # Border color theo room
+
         if self.viewing_mode == "room_001":
             border_color = ModernColors.NEON_CYAN
         elif self.viewing_mode == "room_002":
             border_color = ModernColors.NEON_PINK
         else:
             border_color = ModernColors.NEON_YELLOW
-            
         pygame.draw.rect(self.screen, border_color, arena_rect, width=2)
-        
-        # Render walls (QUAN TRỌNG)
-        self._render_walls(game_state, arena_rect)
-        
-        # Render các element khác
-        self._render_bullets(game_state, arena_rect)
-        self._render_bots(game_state, arena_rect)
-        
-        # Debug info
+
+        # Clip game objects to the arena viewport so bullets/bots never draw outside it.
+        previous_clip = self.screen.get_clip()
+        self.screen.set_clip(arena_rect)
+        try:
+            self._render_walls(game_state, arena_rect)
+            self._render_bullets(game_state, arena_rect)
+            self._render_bots(game_state, arena_rect)
+        finally:
+            self.screen.set_clip(previous_clip)
+
         if self.show_debug:
             self._render_debug_overlay(game_state, arena_rect)
-    
+
     def _render_walls(self, game_state, arena_rect):
         """Render walls với debug info"""
         for i, wall in enumerate(game_state.walls):
             wall_rect = pygame.Rect(
-                arena_rect.x + wall.x,
-                arena_rect.y + wall.y,
-                wall.width,
-                wall.height
+                int(arena_rect.x + wall.x * self.scale),
+                int(arena_rect.y + wall.y * self.scale),
+                max(1, int(wall.width * self.scale)),
+                max(1, int(wall.height * self.scale))
             )
             
             # Render wall
@@ -452,9 +575,8 @@ class GameRenderer:
     def _render_bullets(self, game_state, arena_rect):
         """Render bullets with glow"""
         for bullet in game_state.bullets:
-            bullet_x = arena_rect.x + bullet.x
-            bullet_y = arena_rect.y + bullet.y
-            bullet_radius = max(3, bullet.radius)
+            bullet_x, bullet_y = self._world_to_screen(bullet.x, bullet.y, arena_rect)
+            bullet_radius = max(2, bullet.radius * self.scale)
             
             # Glow effect
             for i in range(3, 0, -1):
@@ -462,9 +584,10 @@ class GameRenderer:
                 glow_alpha = 80 // i
                 glow_color = (*ModernColors.BULLET_GLOW[:3], glow_alpha)
                 
-                glow_surf = pygame.Surface((glow_radius * 4, glow_radius * 4), pygame.SRCALPHA)
-                pygame.draw.circle(glow_surf, glow_color, (glow_radius * 2, glow_radius * 2), glow_radius)
-                self.screen.blit(glow_surf, (bullet_x - glow_radius * 2, bullet_y - glow_radius * 2), 
+                glow_radius_i = max(1, int(glow_radius))
+                glow_surf = pygame.Surface((glow_radius_i * 4, glow_radius_i * 4), pygame.SRCALPHA)
+                pygame.draw.circle(glow_surf, glow_color, (glow_radius_i * 2, glow_radius_i * 2), glow_radius_i)
+                self.screen.blit(glow_surf, (bullet_x - glow_radius_i * 2, bullet_y - glow_radius_i * 2), 
                                special_flags=pygame.BLEND_ALPHA_SDL2)
             
             # Core bullet
@@ -487,91 +610,135 @@ class GameRenderer:
             self._render_bot(bot, arena_rect)
     
     def _render_bot(self, bot, arena_rect):
-        """Render individual bot"""
-        bot_x = arena_rect.x + bot.x
-        bot_y = arena_rect.y + bot.y
-        bot_radius = max(12, bot.radius)
-        
-        # Bot colors
-        if bot.state == BotState.ALIVE:
-            core_color = ModernColors.BOT_ALIVE
-            glow_color = ModernColors.BOT_ALIVE_GLOW
+        """Render individual bot with team color and weapon/role silhouette."""
+        bot_x, bot_y = self._world_to_screen(bot.x, bot.y, arena_rect)
+        bot_radius = max(10, int(bot.radius * self.scale * 1.25))
+
+        team_label = self._team_label(bot)
+        team_color = self._team_color(team_label)
+        team_glow = self._team_glow(team_label)
+        role = self._role_abbr(bot)
+
+        if bot.state == BotState.DEAD:
+            core_color = ModernColors.BOT_DEAD
+            ring_color = (150, 150, 150)
+            glow_color = (*ModernColors.BOT_DEAD[:3], 45)
         elif bot.state == BotState.INVULNERABLE:
             core_color = ModernColors.BOT_INVULNERABLE
+            ring_color = team_color
             glow_color = ModernColors.BOT_INVULNERABLE_GLOW
         else:
-            core_color = ModernColors.BOT_DEAD
-            glow_color = (*ModernColors.BOT_DEAD[:3], 50)
-        
+            core_color = team_color
+            ring_color = ModernColors.WHITE
+            glow_color = team_glow
+
         # Selection highlight
         if bot == self.selected_bot:
             for i in range(4, 0, -1):
-                highlight_radius = bot_radius + i * 4
-                highlight_alpha = 60 // i
-                highlight_color = (*ModernColors.NEON_CYAN[:3], highlight_alpha)
-                
+                highlight_radius = bot_radius + i * 5
+                highlight_alpha = 70 // i
+                highlight_color = (*ModernColors.NEON_YELLOW[:3], highlight_alpha)
                 highlight_surf = pygame.Surface((highlight_radius * 4, highlight_radius * 4), pygame.SRCALPHA)
                 pygame.draw.circle(highlight_surf, highlight_color,
                                  (highlight_radius * 2, highlight_radius * 2), highlight_radius)
                 self.screen.blit(highlight_surf,
                                (bot_x - highlight_radius * 2, bot_y - highlight_radius * 2),
                                special_flags=pygame.BLEND_ALPHA_SDL2)
-        
-        # Bot glow
+
+        # Team glow, bigger than old body so each team is visible at low scale.
         if bot.state != BotState.DEAD:
             for i in range(3, 0, -1):
-                glow_radius = bot_radius * (1 + i * 0.3)
-                glow_alpha = 60 // i
+                glow_radius = int(bot_radius * (1.3 + i * 0.3))
+                glow_alpha = 70 // i
                 current_glow = (*glow_color[:3], glow_alpha)
-                
                 glow_surf = pygame.Surface((glow_radius * 4, glow_radius * 4), pygame.SRCALPHA)
                 pygame.draw.circle(glow_surf, current_glow,
                                  (glow_radius * 2, glow_radius * 2), glow_radius)
                 self.screen.blit(glow_surf,
                                (bot_x - glow_radius * 2, bot_y - glow_radius * 2),
                                special_flags=pygame.BLEND_ALPHA_SDL2)
-        
-        # Main bot body
-        pygame.draw.circle(self.screen, core_color, (int(bot_x), int(bot_y)), int(bot_radius))
-        pygame.draw.circle(self.screen, ModernColors.WHITE, (int(bot_x), int(bot_y)), int(bot_radius), 2)
-        
-        # Aim line
+
+        # Weapon barrel / direction indicator. Different gun roles get different silhouettes.
         if bot.state in [BotState.ALIVE, BotState.INVULNERABLE]:
-            aim_length = bot_radius + 25
-            aim_end_x = bot_x + math.cos(bot.aim_angle) * aim_length
-            aim_end_y = bot_y + math.sin(bot.aim_angle) * aim_length
-            
-            pygame.draw.line(self.screen, ModernColors.NEON_YELLOW,
-                           (int(bot_x), int(bot_y)),
-                           (int(aim_end_x), int(aim_end_y)), 3)
-            
-            pygame.draw.circle(self.screen, ModernColors.NEON_YELLOW,
-                             (int(aim_end_x), int(aim_end_y)), 5)
-        
+            aim = float(getattr(bot, "aim_angle", 0.0) or 0.0)
+            ux, uy = math.cos(aim), math.sin(aim)
+            px, py = -uy, ux
+            start = (int(bot_x + ux * (bot_radius * 0.25)), int(bot_y + uy * (bot_radius * 0.25)))
+
+            if role == "SNI":
+                length = bot_radius + 26
+                width = 3
+                end = (int(bot_x + ux * length), int(bot_y + uy * length))
+                pygame.draw.line(self.screen, ModernColors.NEON_YELLOW, start, end, width)
+                scope = (int(bot_x + ux * (bot_radius + 12)), int(bot_y + uy * (bot_radius + 12)))
+                pygame.draw.circle(self.screen, ModernColors.WHITE, scope, 4, 1)
+                pygame.draw.line(self.screen, ModernColors.WHITE,
+                                 (int(end[0] + px * 4), int(end[1] + py * 4)),
+                                 (int(end[0] - px * 4), int(end[1] - py * 4)), 1)
+            elif role == "SMG":
+                length = bot_radius + 14
+                end = (int(bot_x + ux * length), int(bot_y + uy * length))
+                pygame.draw.line(self.screen, ModernColors.NEON_YELLOW, start, end, 5)
+                muzzle = pygame.Rect(0, 0, 6, 6)
+                muzzle.center = end
+                pygame.draw.rect(self.screen, ModernColors.WHITE, muzzle, border_radius=2)
+            else:  # AR
+                length = bot_radius + 20
+                end = (int(bot_x + ux * length), int(bot_y + uy * length))
+                pygame.draw.line(self.screen, ModernColors.NEON_YELLOW, start, end, 4)
+                mag_center = (bot_x + ux * (bot_radius + 2), bot_y + uy * (bot_radius + 2))
+                pygame.draw.line(self.screen, ModernColors.WHITE,
+                                 (int(mag_center[0]), int(mag_center[1])),
+                                 (int(mag_center[0] + px * 8), int(mag_center[1] + py * 8)), 3)
+
+        # Role-specific bot body shape.
+        cx, cy = int(bot_x), int(bot_y)
+        aim = float(getattr(bot, "aim_angle", 0.0) or 0.0)
+        if role == "SNI":
+            points = []
+            for ang, dist in [(aim, bot_radius * 1.35), (aim + 2.35, bot_radius), (aim - 2.35, bot_radius)]:
+                points.append((int(bot_x + math.cos(ang) * dist), int(bot_y + math.sin(ang) * dist)))
+            pygame.draw.polygon(self.screen, core_color, points)
+            pygame.draw.polygon(self.screen, ring_color, points, width=2)
+        elif role == "SMG":
+            points = [(cx, cy - bot_radius), (cx + bot_radius, cy), (cx, cy + bot_radius), (cx - bot_radius, cy)]
+            pygame.draw.polygon(self.screen, core_color, points)
+            pygame.draw.polygon(self.screen, ring_color, points, width=2)
+        else:
+            pygame.draw.circle(self.screen, core_color, (cx, cy), bot_radius)
+            pygame.draw.circle(self.screen, ring_color, (cx, cy), bot_radius, 2)
+
+        # Clear role text inside the bot.
+        role_surface = self.fonts['tiny'].render(role, True, ModernColors.BLACK if bot.state != BotState.DEAD else ModernColors.WHITE)
+        role_rect = role_surface.get_rect(center=(cx, cy))
+        self.screen.blit(role_surface, role_rect)
+
+        if bot.state == BotState.DEAD:
+            pygame.draw.line(self.screen, ModernColors.HP_LOW, (cx - bot_radius, cy - bot_radius), (cx + bot_radius, cy + bot_radius), 3)
+            pygame.draw.line(self.screen, ModernColors.HP_LOW, (cx + bot_radius, cy - bot_radius), (cx - bot_radius, cy + bot_radius), 3)
+
         # HP bar
         if bot.state != BotState.DEAD:
-            self._render_hp_bar(bot, bot_x, bot_y - bot_radius - 18)
-        
-        # Bot name
-        name_display = bot.name if len(bot.name) <= 10 else bot.name[:7] + "..."
-        name_surface = self.fonts['tiny'].render(name_display, True, ModernColors.TEXT_PRIMARY)
-        name_rect = name_surface.get_rect(center=(int(bot_x), int(bot_y + bot_radius + 20)))
-        
-        # Name background
-        bg_rect = name_rect.inflate(6, 2)
-        pygame.draw.rect(self.screen, (*ModernColors.BLACK[:3], 180), bg_rect)
+            self._render_hp_bar(bot, bot_x, bot_y - bot_radius - 22)
+
+        # Bot name + team label
+        name_display = bot.name if len(bot.name) <= 12 else bot.name[:9] + "..."
+        label_text = f"{team_label[-1]}-{name_display}"
+        name_surface = self.fonts['tiny'].render(label_text, True, ModernColors.TEXT_PRIMARY)
+        name_rect = name_surface.get_rect(center=(int(bot_x), int(bot_y + bot_radius + 21)))
+        bg_rect = name_rect.inflate(8, 4)
+        pygame.draw.rect(self.screen, (*ModernColors.BLACK[:3], 190), bg_rect, border_radius=3)
+        pygame.draw.rect(self.screen, team_color, bg_rect, width=1, border_radius=3)
         self.screen.blit(name_surface, name_rect)
-        
-        # Debug info
+
         if self.show_debug:
-            debug_text = f"ID:{bot.id} HP:{bot.hp:.0f} K/D:{bot.kills}/{bot.deaths}"
+            debug_text = f"ID:{bot.id} HP:{bot.hp:.0f} K/D:{bot.kills}/{bot.deaths} {role}"
             debug_surface = self.fonts['tiny'].render(debug_text, True, ModernColors.NEON_CYAN)
-            self.screen.blit(debug_surface, (int(bot_x - 40), int(bot_y + bot_radius + 35)))
-    
+            self.screen.blit(debug_surface, (int(bot_x - 48), int(bot_y + bot_radius + 38)))
     def _render_hp_bar(self, bot, x, y):
         """Render HP bar"""
-        bar_width = 50
-        bar_height = 6
+        bar_width = max(30, int(50 * self.scale))
+        bar_height = max(4, int(6 * self.scale))
         
         # Background
         bg_rect = pygame.Rect(x - bar_width//2, y, bar_width, bar_height)
@@ -607,8 +774,9 @@ class GameRenderer:
         
         debug_info = [
             f"Debug Mode: ON",
-            f"Arena: {arena_rect.width}x{arena_rect.height}",
-            f"Scale: {self.scale:.2f}",
+            f"World: {int(self.world_width)}x{int(self.world_height)}",
+            f"View: {arena_rect.width}x{arena_rect.height}",
+            f"Scale: {self.scale:.2f}x",
             f"Bots: {len(game_state.bots)}",
             f"Bullets: {len(game_state.bullets)}",
             f"Walls: {len(game_state.walls)}"
@@ -691,47 +859,46 @@ class GameRenderer:
             for i, button in enumerate(self.speed_buttons):
                 button.active = (i == button_index)
             
-            # Update game speed
-            game_engine.game_state.speed_multiplier = self.speed_buttons[button_index].speed
-            logger.info(f"Speed changed to {self.speed_buttons[button_index].speed}x")
+            # Update game speed for default state and all room states
+            new_speed = self.speed_buttons[button_index].speed
+            game_engine.game_state.speed_multiplier = new_speed
+            for room_state in getattr(game_engine, "room_states", {}).values():
+                room_state.speed_multiplier = new_speed
+            logger.info(f"Speed changed to {new_speed}x")
     
     def _handle_mouse_click(self, pos, game_engine):
-        """Handle mouse clicks"""
+        """Handle mouse clicks."""
         mouse_x, mouse_y = pos
-        
+
         # Check speed buttons
         for i, button in enumerate(self.speed_buttons):
             if button.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=pos)):
                 self._set_speed(i, game_engine)
                 return
-        
-        # Check arena clicks for bot selection
-        if mouse_x >= self.arena_offset_x and mouse_y >= self.arena_offset_y:
-            # Convert screen coordinates to arena coordinates
-            arena_x = mouse_x - self.arena_offset_x
-            arena_y = mouse_y - self.arena_offset_y
-            
-            # Check if click is within arena bounds
-            if 0 <= arena_x <= self.arena_width and 0 <= arena_y <= self.arena_height:
-                # Find closest bot
-                closest_bot = None
-                closest_distance = float('inf')
-                
-                for bot in game_engine.game_state.bots.values():
-                    dx = bot.x - arena_x
-                    dy = bot.y - arena_y
-                    distance = math.sqrt(dx*dx + dy*dy)
-                    
-                    if distance < bot.radius + 25 and distance < closest_distance:
-                        closest_bot = bot
-                        closest_distance = distance
-                
-                if closest_bot:
-                    self.selected_bot = closest_bot
-                    logger.info(f"Selected bot: {closest_bot.name} (ID: {closest_bot.id})")
-                else:
-                    self.selected_bot = None
-    
+
+        game_state, _ = self._get_viewed_game_state(game_engine)
+        arena_rect = self._compute_arena_rect(game_state)
+
+        if arena_rect.collidepoint(mouse_x, mouse_y):
+            arena_x, arena_y = self._screen_to_world(mouse_x, mouse_y, arena_rect)
+            closest_bot = None
+            closest_distance = float('inf')
+
+            for bot in game_state.bots.values():
+                dx = bot.x - arena_x
+                dy = bot.y - arena_y
+                distance = math.sqrt(dx * dx + dy * dy)
+
+                if distance < bot.radius + 40 and distance < closest_distance:
+                    closest_bot = bot
+                    closest_distance = distance
+
+            if closest_bot:
+                self.selected_bot = closest_bot
+                logger.info(f"Selected bot: {closest_bot.name} (ID: {closest_bot.id})")
+            else:
+                self.selected_bot = None
+
     def _handle_mouse_motion(self, event):
         """Handle mouse motion for hover effects"""
         for button in self.speed_buttons:

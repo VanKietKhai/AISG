@@ -251,20 +251,20 @@ class HMoeModel(BaseAIModel):
         can_shoot = bool(obs.get("can_shoot", ammo > 0 and not is_reloading and cooldown <= 1e-4))
 
         if weapon == "SNIPER":
-            if distance < 260.0:
-                move_x, move_y = -0.85 * toward_x, -0.85 * toward_y
-            elif distance > min(480.0, max_range * 0.8):
-                move_x, move_y = 0.45 * toward_x, 0.45 * toward_y
+            if distance < 280.0:
+                move_x, move_y = -0.90 * toward_x, -0.90 * toward_y
+            elif distance > min(500.0, max_range * 0.82):
+                move_x, move_y = 0.38 * toward_x, 0.38 * toward_y
             else:
-                move_x, move_y = 0.42 * strafe_x, 0.42 * strafe_y
-            bloom_limit = 2.2
+                move_x, move_y = 0.40 * strafe_x, 0.40 * strafe_y
+            bloom_limit = 1.8
         elif weapon == "SMG":
-            desired = min(95.0, max_range * 0.75)
+            desired = min(105.0, max_range * 0.85)
             if distance > desired:
                 move_x, move_y = 0.92 * toward_x, 0.92 * toward_y
             else:
-                move_x, move_y = 0.62 * strafe_x, 0.62 * strafe_y
-            bloom_limit = 3.2
+                move_x, move_y = 0.65 * strafe_x, 0.65 * strafe_y
+            bloom_limit = 4.5
         else:  # AR
             if distance < 140.0:
                 move_x, move_y = -0.45 * toward_x + 0.35 * strafe_x, -0.45 * toward_y + 0.35 * strafe_y

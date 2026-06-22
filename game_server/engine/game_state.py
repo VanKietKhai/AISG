@@ -33,6 +33,8 @@ class Bot:
     invulnerable_until: float = 0.0
     radius: float = 15.0
     room_id: str = None
+    team_id: str = None
+    role: str = None
     weapon_type: str = "AR"
     weapon_state: Optional[WeaponRuntimeState] = None
 
@@ -133,6 +135,8 @@ class GameState:
         room_id: str = None,
         custom_bot_id: int = None,
         weapon_type: str = "AR",
+        team_id: str = None,
+        role: str = None,
     ) -> int:
         if arena_config and len(self.bots) == 0:
             self._create_arena_walls(arena_config)
@@ -155,6 +159,8 @@ class GameState:
             x=spawn_x,
             y=spawn_y,
             room_id=room_id,
+            team_id=team_id or player_id,
+            role=role or weapon_definition.key.lower(),
             weapon_type=weapon_definition.key,
             weapon_state=self.weapon_config.create_runtime(weapon_definition.key),
         )
@@ -277,8 +283,9 @@ class GameState:
             return {}
         
         # Find enemies (different player_id)
+        own_team = bot.team_id or bot.player_id
         enemies = [b for b in self.bots.values() 
-                  if b.id != bot_id and b.player_id != bot.player_id and b.state == BotState.ALIVE]
+                  if b.id != bot_id and (b.team_id or b.player_id) != own_team and b.state == BotState.ALIVE]
         
         # Use closest enemy
         enemy_pos = (0, 0)
@@ -325,6 +332,8 @@ class GameState:
             'arena_width': self.width,
             'arena_height': self.height,
             'weapon_type': bot.weapon_type,
+            'team_id': bot.team_id or bot.player_id,
+            'role': bot.role or bot.weapon_type.lower(),
             'ammo': weapon_state.ammo,
             'magazine_size': weapon_definition.magazine,
             'is_reloading': weapon_state.is_reloading,

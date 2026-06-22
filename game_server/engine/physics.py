@@ -199,9 +199,14 @@ class PhysicsEngine:
         
         for bullet in self.game_state.bullets:
             for bot in self.game_state.bots.values():
-                # Skip shooter and non-alive bots
+                # Skip shooter, non-alive bots, and same-team friendly fire.
+                shooter = self.game_state.bots.get(bullet.shooter_id)
+                same_team = False
+                if shooter is not None:
+                    same_team = (bot.team_id or bot.player_id) == (shooter.team_id or shooter.player_id)
                 if (bot.id == bullet.shooter_id or 
-                    bot.state != BotState.ALIVE):
+                    bot.state != BotState.ALIVE or
+                    same_team):
                     continue
                 
                 # Check collision

@@ -17,15 +17,18 @@ from ai_bot.client.bot_client import BotClient
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Global bot client for graceful shutdown
-bot_client = None
+# Global bot clients for graceful shutdown
+bot_clients = []
+bot_client = None  # backward-compatible alias for single-bot runs
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully with auto-save"""
-    global bot_client
-    if bot_client:
-        logger.info("🛑 Received shutdown signal - saving model...")
-        asyncio.create_task(bot_client._save_model("manual_shutdown"))
+    global bot_clients, bot_client
+    clients = bot_clients or ([bot_client] if bot_client else [])
+    if clients:
+        logger.info("🛑 Received shutdown signal - saving model(s)...")
+        for client in clients:
+            asyncio.create_task(client._save_model("manual_shutdown"))
     sys.exit(0)
 
 def find_latest_model(player_id, models_dir):
@@ -92,6 +95,9 @@ async def main():
     parser.add_argument('--save-interval', type=int, default=300, help='Auto-save interval in seconds')
     parser.add_argument('--room-id', required=True, help='Room ID to join')
     parser.add_argument('--room-password', required=True, help='Room password')
+    parser.add_argument('--team-id', help='Logical team ID. Defaults to --player-id')
+    parser.add_argument('--team-size', type=int, default=1, help='Number of AI agents this client process should create')
+    parser.add_argument('--team-loadout', default='AR,SNIPER,SMG', help='Comma-separated weapon cycle for team agents. Allowed: AR,SNIPER,SMG')
     
     args = parser.parse_args()
     
@@ -124,10 +130,13 @@ async def main():
     logger.info(f"🤖 Bot Name: {args.bot_name}")
     logger.info(f"🤖 Player ID: {args.player_id}")
     logger.info(f"🌐 Server: {args.host}:{args.port}")
-    logger.info("⚔️ Mode: PvP Combat")
-    logger.info("🧠 Features: Wall Avoidance + Smart Aiming + Auto-Save")
+    logger.info("⚔️ Mode: Team PvP Combat")
+    logger.info("🧠 Features: Weapon roles + Wall/obstacle avoidance + Smart aiming + Auto-save")
     logger.info(f"💾 Models Directory: {args.models_dir}")
     logger.info(f"⏰ Auto-save Interval: {args.save_interval}s")
+    logger.info(f"👥 Team ID: {args.team_id or args.player_id}")
+    logger.info(f"👥 Team size: {args.team_size}")
+    logger.info(f"🔫 Team loadout: {args.team_loadout}")
     
     # Model loading logic
     model_to_load = None
@@ -158,50 +167,71 @@ async def main():
     
     logger.info("🤖 ==========================================")
     
-    # Create AI components
-    model = HMoeModel()
-    # PPO disabled: trainer = PPOTrainer(network)
-    obs_processor = None  # HMoe processes dicts directly
-    buffer = None
-    
-    # Create enhanced bot client
-    bot_client = BotClient(
-    player_id=args.player_id,
-    bot_name=args.bot_name,
-    trainer=model,          # HMoeModel
-    obs_processor=None,     # KHÔNG truyền model vào đây
-    room_id=args.room_id,
-    room_password=args.room_password
-    )
-    
-    # Set auto-save interval
-    bot_client.save_interval = args.save_interval
-    
-    # Load model if specified
-    if model_to_load:
-        success = bot_client.load_model(model_to_load)
-        if not success:
-            logger.warning("⚠️ Model loading failed - continuing with fresh network")
-    
-    try:
-        logger.info("🔌 Connecting to Arena Battle Server...")
-        logger.info("⏳ Server will automatically assign to PvP match")
-        logger.info("🎯 Minimum 2 players required to start battle")
-        logger.info("💾 Model will auto-save periodically and on improvements")
-        logger.info("🛑 Press Ctrl+C to stop and save model")
-        
-        await bot_client.connect_and_play(
-            host=args.host,
-            port=args.port
+    # Create one BotClient per team member. For --team-size 1 this is exactly
+    # the old behavior; for larger values one OS client process controls a team.
+    allowed_weapons = {"SNIPER", "AR", "SMG"}
+    raw_loadout = [w.strip().upper() for w in args.team_loadout.split(',') if w.strip()]
+    loadout = [w for w in raw_loadout if w in allowed_weapons]
+    if not loadout:
+        logger.warning("⚠️ Invalid --team-loadout; falling back to AR,SNIPER,SMG")
+        loadout = ["AR", "SNIPER", "SMG"]
+
+    if args.team_size < 1:
+        logger.warning("⚠️ --team-size must be >= 1; using 1")
+        args.team_size = 1
+
+    team_id = args.team_id or args.player_id
+    global bot_clients, bot_client
+    bot_clients = []
+
+    for idx in range(args.team_size):
+        weapon = loadout[idx % len(loadout)]
+        member_player_id = args.player_id if args.team_size == 1 else f"{args.player_id}_m{idx+1:02d}_{weapon.lower()}"
+        member_bot_name = args.bot_name if args.team_size == 1 else f"{args.bot_name}-{weapon}-{idx+1}"
+        model = HMoeModel()
+        client = BotClient(
+            player_id=member_player_id,
+            bot_name=member_bot_name,
+            trainer=model,
+            obs_processor=None,
+            room_id=args.room_id,
+            room_password=args.room_password,
+            team_id=team_id,
+            weapon_type=weapon,
+            role=weapon.lower(),
         )
+        client.save_interval = args.save_interval
+        bot_clients.append(client)
+
+    bot_client = bot_clients[0] if bot_clients else None
+
+    # Load model if specified. In team mode each member gets the same lightweight
+    # starting checkpoint; later saves are separated by member_player_id.
+    if model_to_load:
+        for client in bot_clients:
+            success = client.load_model(model_to_load)
+            if not success:
+                logger.warning(f"⚠️ Model loading failed for {client.bot_name} - continuing fresh")
+
+    try:
+        logger.info("🔌 Connecting team to Arena Battle Server...")
+        logger.info("⏳ Server starts combat when at least two distinct teams are in the room")
+        logger.info("💾 Models will auto-save periodically and on improvements")
+        logger.info("🛑 Press Ctrl+C to stop and save models")
+
+        await asyncio.gather(*[
+            client.connect_and_play(host=args.host, port=args.port)
+            for client in bot_clients
+        ])
     except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user - saving final model...")
-        await bot_client._save_model("user_stop")
+        logger.info("🛑 Bot stopped by user - saving final model(s)...")
+        for client in bot_clients:
+            await client._save_model("user_stop")
         logger.info("👋 Goodbye!")
     except Exception as e:
         logger.error(f"💥 Unexpected error: {e}")
-        if bot_client:
-            await bot_client._save_model("error_save")
+        for client in bot_clients:
+            await client._save_model("error_save")
 
 if __name__ == "__main__":
     asyncio.run(main())

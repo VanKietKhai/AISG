@@ -16,6 +16,8 @@ class Player:
     connection_time: float = field(default_factory=time.time)
     bot_id: Optional[int] = None
     weapon_type: str = "AR"
+    team_id: str = None
+    role: str = None
 
 @dataclass 
 class Room:
@@ -27,6 +29,15 @@ class Room:
     weapon_loadout_cycle: List[str] = field(default_factory=lambda: ["AR", "SNIPER", "SMG"])
     players: List[Player] = field(default_factory=list)
     created_time: float = field(default_factory=time.time)
+
+    def team_ids(self) -> set:
+        return {player.team_id or player.id for player in self.players}
+
+    def active_team_count(self) -> int:
+        return len(self.team_ids())
+
+    def is_active(self) -> bool:
+        return self.active_team_count() >= 2
 
 class RoomManager:
     """Room-based system replacing matchmaking"""
@@ -85,7 +96,7 @@ class RoomManager:
         default_rooms = {
             "room_default": {
                 "password": "default123",
-                "max_players": 4,
+                "max_players": 8,
                 "weapon_loadout_cycle": ["AR", "SNIPER", "SMG"],
                 "arena": {
                     "width": 800,
@@ -119,18 +130,30 @@ class RoomManager:
             raise ValueError("weapon_loadout_cycle must contain only SNIPER, AR or SMG")
         return cycle
 
-    def join_room(self, player_id: str, bot_name: str, room_id: str, room_password: str) -> Dict:
-        """Join a specific room with password"""
-        
-        # Check if player already in a room
+    def join_room(
+        self,
+        player_id: str,
+        bot_name: str,
+        room_id: str,
+        room_password: str,
+        team_id: str = None,
+        requested_weapon_type: str = None,
+        role: str = None,
+    ) -> Dict:
+        """Join a specific room with password.
+
+        A logical client can now create a team by opening multiple bot
+        connections with different player_id values but the same team_id.
+        The room becomes active only when at least two distinct teams exist.
+        """
+
         if player_id in self.player_to_room:
             return {
                 'success': False,
                 'message': f'Player {player_id} already in room {self.player_to_room[player_id]}',
                 'bot_id': 0
             }
-        
-        # Check if room exists
+
         if room_id not in self.rooms:
             available_rooms = list(self.rooms.keys())
             return {
@@ -138,61 +161,84 @@ class RoomManager:
                 'message': f"❌ Room ID '{room_id}' does not exist. Available: {available_rooms}",
                 'bot_id': 0
             }
-        
+
         room = self.rooms[room_id]
-        
-        # Check password
+
         if room.password != room_password:
             return {
                 'success': False,
                 'message': f"❌ Wrong password for room '{room_id}'",
                 'bot_id': 0
             }
-        
-        # Check room capacity
+
         if len(room.players) >= room.max_players:
             return {
                 'success': False,
-                'message': f"❌ Room '{room_id}' is full ({len(room.players)}/{room.max_players} players)",
+                'message': f"❌ Room '{room_id}' is full ({len(room.players)}/{room.max_players} bot slots)",
                 'bot_id': 0
             }
-        
-        # Server assigns loadouts deterministically by join order.
-        weapon_type = room.weapon_loadout_cycle[len(room.players) % len(room.weapon_loadout_cycle)]
-        player = Player(id=player_id, bot_name=bot_name, weapon_type=weapon_type)
+
+        team_id = (team_id or player_id).strip() or player_id
+        allowed_weapons = set(self._validate_loadout_cycle(room.weapon_loadout_cycle))
+        if requested_weapon_type:
+            requested_weapon_type = requested_weapon_type.upper()
+            if requested_weapon_type not in allowed_weapons:
+                return {
+                    'success': False,
+                    'message': f"❌ Weapon '{requested_weapon_type}' is not allowed in room '{room_id}'. Allowed: {sorted(allowed_weapons)}",
+                    'bot_id': 0,
+                }
+            weapon_type = requested_weapon_type
+        else:
+            weapon_type = room.weapon_loadout_cycle[len(room.players) % len(room.weapon_loadout_cycle)]
+
+        player = Player(
+            id=player_id,
+            bot_name=bot_name,
+            weapon_type=weapon_type,
+            team_id=team_id,
+            role=role or weapon_type.lower(),
+        )
         room.players.append(player)
         self.player_to_room[player_id] = room_id
         self.total_players_served += 1
-        
-        # Generate bot ID
+
         bot_id = self._generate_bot_id(player, room)
         player.bot_id = bot_id
-        
+
         players_count = len(room.players)
-        status_msg = f"✅ Joined room {room_id} ({players_count}/{room.max_players} players)"
-        
-        if players_count >= 2:
+        team_count = room.active_team_count()
+        status_msg = f"✅ Joined room {room_id} ({players_count}/{room.max_players} bot slots, {team_count} team(s))"
+
+        if room.is_active():
             status_msg += " - ⚔️ Battle active!"
         else:
-            status_msg += " - ⏳ Waiting for more players..."
-        
+            status_msg += " - ⏳ Waiting for another team..."
+
         obstacle_count = len(room.arena_config.get('obstacles', []))
         logger.debug(
-            f"Room {room_id} returns {obstacle_count} obstacles and weapon {weapon_type}"
+            f"Room {room_id} returns {obstacle_count} obstacles, team {team_id}, weapon {weapon_type}"
         )
-        
-        logger.info(f"👤 {player_id} → Room {room_id} ({players_count}/{room.max_players})")
-        
+
+        logger.info(
+            f"👤 {player_id} ({bot_name}) → Room {room_id}, team {team_id}, "
+            f"weapon {weapon_type} ({players_count}/{room.max_players} bot slots)"
+        )
+
         return {
             'success': True,
             'room_id': room_id,
             'bot_id': bot_id,
             'message': status_msg,
             'players_in_room': players_count,
+            'teams_in_room': team_count,
+            'max_players': room.max_players,
             'arena_config': room.arena_config,
             'weapon_type': weapon_type,
+            'team_id': team_id,
+            'role': player.role,
         }
-    
+
     def _generate_bot_id(self, player: Player, room: Room) -> int:
         bot_id = RoomManager._global_bot_id
         RoomManager._global_bot_id += 1
@@ -219,13 +265,15 @@ class RoomManager:
             return {'error': f'Room {room_id} not found'}
         room = self.rooms[room_id]
         player_count = len(room.players)
-        room = self.rooms[room_id]
+        team_count = room.active_team_count()
         return {
             'room_id': room.id,
             'players': [
                 {
                     'id': p.id,
+                    'team_id': p.team_id or p.id,
                     'name': p.bot_name,
+                    'role': p.role or p.weapon_type.lower(),
                     'bot_id': p.bot_id,
                     'weapon_type': p.weapon_type,
                     'connected_time': time.time() - p.connection_time
@@ -233,30 +281,33 @@ class RoomManager:
                 for p in room.players
             ],
             'player_count': player_count,
+            'team_count': team_count,
             'max_players': room.max_players,
             'arena_config': room.arena_config,
-            'is_active': len(room.players) >= 2,
-            'status': 'active' if player_count >= 2 else 'waiting'
+            'is_active': room.is_active(),
+            'status': 'active' if room.is_active() else 'waiting'
         }
-    
+
     def get_all_rooms(self) -> List[Dict]:
-        """Get list of all rooms with player counts"""
+        """Get list of all rooms with player/team counts"""
         rooms_list = []
         for room in self.rooms.values():
             rooms_list.append({
                 'id': room.id,
                 'players': len(room.players),
+                'teams': room.active_team_count(),
                 'max_players': room.max_players,
-                'is_active': len(room.players) >= 2,
+                'is_active': room.is_active(),
                 'weapon_loadout_cycle': list(room.weapon_loadout_cycle),
-                'player_names': [p.bot_name for p in room.players]
+                'player_names': [p.bot_name for p in room.players],
+                'team_ids': sorted(room.team_ids()),
             })
         return rooms_list
-    
+
     def get_statistics(self) -> Dict:
         """Get room manager statistics"""
         total_active_players = sum(len(room.players) for room in self.rooms.values())
-        active_rooms = len([r for r in self.rooms.values() if len(r.players) >= 2])
+        active_rooms = len([r for r in self.rooms.values() if r.is_active()])
         
         return {
             'total_rooms': len(self.rooms),

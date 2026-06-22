@@ -1,16 +1,18 @@
-# torch>=1.13.0
-# numpy>=1.21.0
-# grpcio>=1.50.0
-# grpcio-tools>=1.50.0
-# protobuf>=4.0.0
+# AISG / Arena Battle Game dependencies
+# Recommended Python: 3.10.x
 
-# # Visualization
-# pygame>=2.1.0
+# Core numeric + AI training
+numpy>=1.26.0,<3.0
+torch>=2.2.0
 
-# # Optional: For better logging
-# rich>=12.0.0
+# gRPC networking + protobuf generated files
+# proto/arena_pb2.py was generated with Protobuf Python Version 5.29.0
+protobuf>=5.29.0,<6.0
+grpcio>=1.68.0,<2.0
+grpcio-tools>=1.68.0,<2.0
 
-# PyTorch
-# Luminoth
-# Delorean
-# BeautifulSoup
+# Game UI / visualization
+pygame>=2.6.0,<3.0
+
+# Testing / development
+pytest>=8.0.0,<9.0

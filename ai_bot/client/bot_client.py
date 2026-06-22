@@ -24,11 +24,14 @@ logger = logging.getLogger(__name__)
 class BotClient:
     """AI Bot client with wall avoidance, smart aiming, and auto-save (keeping original class name)"""
     
-    def __init__(self, player_id, bot_name, trainer, obs_processor, room_id, room_password):
+    def __init__(self, player_id, bot_name, trainer, obs_processor, room_id, room_password, team_id=None, weapon_type=None, role=None):
         self.player_id = player_id
         self.bot_name = bot_name
         self.room_id = room_id
         self.room_password = room_password
+        self.team_id = team_id or player_id
+        self.requested_weapon_type = weapon_type.upper() if weapon_type else None
+        self.role = role or (self.requested_weapon_type.lower() if self.requested_weapon_type else None)
         self.model = trainer
         self.obs_processor = obs_processor
         
@@ -86,13 +89,26 @@ class BotClient:
             stub = arena_pb2_grpc.ArenaBattleServiceStub(channel)
             
             # Register for PvP matchmaking with FULL bot name
+            registration_payload = f"{self.bot_name}|{self.room_id}|{self.room_password}"
+            if self.team_id or self.requested_weapon_type or self.role:
+                registration_payload = "|".join([
+                    self.bot_name,
+                    self.room_id,
+                    self.room_password,
+                    self.team_id or self.player_id,
+                    self.requested_weapon_type or "",
+                    self.role or "",
+                ])
             registration = arena_pb2.BotRegistration(
                 player_id=self.player_id,
-                bot_name=f"{self.bot_name}|{self.room_id}|{self.room_password}"
+                bot_name=registration_payload
             )
             
             logger.info(f"🤖 Registering smart combat bot: {self.bot_name}")
             logger.info(f"👤 Player ID: {self.player_id}")
+            logger.info(f"👥 Team ID: {self.team_id}")
+            if self.requested_weapon_type:
+                logger.info(f"🔫 Requested weapon: {self.requested_weapon_type}")
             response = await stub.RegisterBot(registration)
             
             if not response.success:
@@ -290,6 +306,8 @@ class BotClient:
                 'arena_width': observation.arena_width,
                 'arena_height': observation.arena_height,
                 'weapon_type': observation.weapon_type,
+                'team_id': self.team_id,
+                'role': self.role or observation.weapon_type.lower(),
                 'ammo': observation.ammo,
                 'magazine_size': observation.magazine_size,
                 'is_reloading': observation.is_reloading,
@@ -407,104 +425,109 @@ class BotClient:
             logger.error(f"💥 Observation processing error: {e}")
 
     def _enhance_wall_avoidance(self, move_x, move_y, obs_dict):
-        """Enhanced wall avoidance system"""
+        """Enhanced wall/obstacle avoidance plus light flank/cover bias."""
         self_pos = obs_dict['self_pos']
         arena_width = obs_dict['arena_width']
         arena_height = obs_dict['arena_height']
-        
-        # Calculate distances to walls
-        left_dist = self_pos['x']
-        right_dist = arena_width - self_pos['x']
-        top_dist = self_pos['y']
-        bottom_dist = arena_height - self_pos['y']
-        
-        # Wall avoidance thresholds
-        danger_zone = 50  # Pixels from wall
-        critical_zone = 25  # Pixels from wall
-        
-        # Enhanced wall avoidance forces
+        weapon = str(obs_dict.get('weapon_type', 'AR') or 'AR').upper()
+        enemy_pos = obs_dict.get('enemy_pos', {'x': 0.0, 'y': 0.0})
+        has_enemy = enemy_pos.get('x', 0) != 0 or enemy_pos.get('y', 0) != 0
+        has_los = bool(obs_dict.get('has_line_of_sight', False))
+        sx, sy = float(self_pos['x']), float(self_pos['y'])
+
+        # Boundary avoidance thresholds
+        danger_zone = 50
+        critical_zone = 25
+        left_dist = sx
+        right_dist = arena_width - sx
+        top_dist = sy
+        bottom_dist = arena_height - sy
         avoid_x = 0.0
         avoid_y = 0.0
-        
-        # Left wall avoidance
+
         if left_dist < danger_zone:
             force = (danger_zone - left_dist) / danger_zone
-            if left_dist < critical_zone:
-                force *= 3.0  # Strong avoidance in critical zone
-            avoid_x += force * 0.8
-            logger.debug(f"🧱 {self.bot_name} avoiding left wall (dist: {left_dist:.1f})")
-        
-        # Right wall avoidance
+            avoid_x += force * (2.4 if left_dist < critical_zone else 0.8)
         if right_dist < danger_zone:
             force = (danger_zone - right_dist) / danger_zone
-            if right_dist < critical_zone:
-                force *= 3.0
-            avoid_x -= force * 0.8
-            logger.debug(f"🧱 {self.bot_name} avoiding right wall (dist: {right_dist:.1f})")
-        
-        # Top wall avoidance
+            avoid_x -= force * (2.4 if right_dist < critical_zone else 0.8)
         if top_dist < danger_zone:
             force = (danger_zone - top_dist) / danger_zone
-            if top_dist < critical_zone:
-                force *= 3.0
-            avoid_y += force * 0.8
-            logger.debug(f"🧱 {self.bot_name} avoiding top wall (dist: {top_dist:.1f})")
-        
-        # Bottom wall avoidance
+            avoid_y += force * (2.4 if top_dist < critical_zone else 0.8)
         if bottom_dist < danger_zone:
             force = (danger_zone - bottom_dist) / danger_zone
-            if bottom_dist < critical_zone:
-                force *= 3.0
-            avoid_y -= force * 0.8
-            logger.debug(f"🧱 {self.bot_name} avoiding bottom wall (dist: {bottom_dist:.1f})")
-        
-        # Apply wall avoidance to movement
-        enhanced_move_x = np.clip(move_x + avoid_x, -1.0, 1.0)
-        enhanced_move_y = np.clip(move_y + avoid_y, -1.0, 1.0)
-        
+            avoid_y -= force * (2.4 if bottom_dist < critical_zone else 0.8)
+
+        # Obstacle avoidance from flattened walls [x,y,w,h,...].
+        # This keeps the old map but lets close-range agents stop face-planting into cover.
+        walls = obs_dict.get('walls', []) or []
+        for i in range(0, len(walls) - 3, 4):
+            wx, wy, ww, wh = map(float, walls[i:i+4])
+            # Skip arena boundary walls already handled above.
+            is_boundary = (ww >= arena_width - 1 or wh >= arena_height - 1)
+            if is_boundary:
+                continue
+            closest_x = min(max(sx, wx), wx + ww)
+            closest_y = min(max(sy, wy), wy + wh)
+            rx, ry = sx - closest_x, sy - closest_y
+            dist = math.hypot(rx, ry)
+            if dist < 90.0:
+                if dist < 1e-5:
+                    # Push out along the smallest axis if inside/centered on a wall.
+                    center_x, center_y = wx + ww * 0.5, wy + wh * 0.5
+                    rx, ry = sx - center_x, sy - center_y
+                    dist = math.hypot(rx, ry) or 1.0
+                force = (90.0 - dist) / 90.0
+                avoid_x += (rx / dist) * force * 0.9
+                avoid_y += (ry / dist) * force * 0.9
+
+        # Weapon-style tactical bias. SMG flanks around cover more aggressively;
+        # sniper and AR keep their policy mostly intact.
+        tactical_x = 0.0
+        tactical_y = 0.0
+        if has_enemy:
+            ex, ey = float(enemy_pos['x']), float(enemy_pos['y'])
+            rx, ry = ex - sx, ey - sy
+            dist = math.hypot(rx, ry) or 1.0
+            toward_x, toward_y = rx / dist, ry / dist
+            strafe_x, strafe_y = -toward_y, toward_x
+            if weapon == 'SMG' and not has_los:
+                # Move diagonally instead of directly into blocked line of sight.
+                tactical_x += 0.35 * strafe_x + 0.25 * toward_x
+                tactical_y += 0.35 * strafe_y + 0.25 * toward_y
+            elif weapon == 'SNIPER' and has_los and dist < 280.0:
+                tactical_x -= 0.20 * toward_x
+                tactical_y -= 0.20 * toward_y
+
+        enhanced_move_x = np.clip(move_x + avoid_x + tactical_x, -1.0, 1.0)
+        enhanced_move_y = np.clip(move_y + avoid_y + tactical_y, -1.0, 1.0)
+
         # Anti-stuck mechanism
         if self.last_position:
             distance_moved = math.sqrt(
-                (self_pos['x'] - self.last_position[0])**2 + 
-                (self_pos['y'] - self.last_position[1])**2
+                (sx - self.last_position[0])**2 +
+                (sy - self.last_position[1])**2
             )
-            
-            if distance_moved < 1.0:  # Bot is stuck
+            if distance_moved < 1.0:
                 self.stuck_counter += 1
-                if self.stuck_counter > 30:  # Stuck for 0.5 seconds at 60fps
-                    # Emergency unstuck movement
-                    emergency_x = random.uniform(-1.0, 1.0)
-                    emergency_y = random.uniform(-1.0, 1.0)
-                    enhanced_move_x = emergency_x
-                    enhanced_move_y = emergency_y
+                if self.stuck_counter > 30:
+                    enhanced_move_x = random.uniform(-1.0, 1.0)
+                    enhanced_move_y = random.uniform(-1.0, 1.0)
                     self.stuck_counter = 0
                     logger.debug(f"🚨 {self.bot_name} emergency unstuck movement activated!")
             else:
                 self.stuck_counter = 0
-        
+
         # Ensure minimum movement (anti-camping)
         movement_magnitude = math.sqrt(enhanced_move_x**2 + enhanced_move_y**2)
-        if movement_magnitude < 0.3:
-            # Add tactical movement
-            enemy_pos = obs_dict['enemy_pos']
-            if enemy_pos['x'] > 0:  # Enemy exists
-                # Strafe movement relative to enemy
-                enemy_angle = math.atan2(
-                    enemy_pos['y'] - self_pos['y'],
-                    enemy_pos['x'] - self_pos['x']
-                )
-                strafe_angle = enemy_angle + math.pi/2  # 90 degrees to enemy
-                
-                strafe_x = math.cos(strafe_angle) * 0.4
-                strafe_y = math.sin(strafe_angle) * 0.4
-                
-                enhanced_move_x = np.clip(enhanced_move_x + strafe_x, -1.0, 1.0)
-                enhanced_move_y = np.clip(enhanced_move_y + strafe_y, -1.0, 1.0)
-                
-                logger.debug(f"🏃 {self.bot_name} tactical strafe movement")
-        
+        if movement_magnitude < 0.3 and has_enemy:
+            enemy_angle = math.atan2(float(enemy_pos['y']) - sy, float(enemy_pos['x']) - sx)
+            strafe_angle = enemy_angle + math.pi/2
+            enhanced_move_x = np.clip(enhanced_move_x + math.cos(strafe_angle) * 0.4, -1.0, 1.0)
+            enhanced_move_y = np.clip(enhanced_move_y + math.sin(strafe_angle) * 0.4, -1.0, 1.0)
+
         return enhanced_move_x, enhanced_move_y
-    
+
     def _enhance_smart_aiming(self, aim_angle, obs_dict):
         """Enhanced smart aiming system"""
         enemy_pos = obs_dict['enemy_pos']
@@ -581,69 +604,68 @@ class BotClient:
         return enhanced_aim
     
     def _enhance_smart_firing(self, should_fire, obs_dict, aim_angle):
-        """Enhanced smart firing system"""
+        """Weapon-aware firing discipline."""
         enemy_pos = obs_dict['enemy_pos']
         self_pos = obs_dict['self_pos']
         has_line_of_sight = obs_dict['has_line_of_sight']
         enemy_hp = obs_dict['enemy_hp']
+        weapon = str(obs_dict.get('weapon_type', 'AR') or 'AR').upper()
         if (not should_fire or obs_dict.get('ammo', 0) <= 0
                 or obs_dict.get('is_reloading', False)
                 or obs_dict.get('shot_cooldown_remaining', 0.0) > 1e-4
                 or not obs_dict.get('can_shoot', True)):
             return False
-        
-        # Don't fire if no enemy
+
         if enemy_pos['x'] == 0 and enemy_pos['y'] == 0:
             return False
-        
-        # Calculate distance to enemy
+
         dx = enemy_pos['x'] - self_pos['x']
         dy = enemy_pos['y'] - self_pos['y']
         distance = math.sqrt(dx*dx + dy*dy)
-        
-        # Calculate aim accuracy
+        max_range = float(obs_dict.get('weapon_max_range', 500.0) or 500.0)
+        in_range = bool(obs_dict.get('in_effective_range', distance <= max_range))
+
         enemy_angle = math.atan2(dy, dx)
         aim_error = abs(aim_angle - enemy_angle)
-        
-        # Handle angle wrapping for error calculation
         if aim_error > math.pi:
             aim_error = 2 * math.pi - aim_error
-        
-        # Firing decision criteria
-        fire_conditions = {
-            'has_line_of_sight': has_line_of_sight,
-            'in_range': bool(obs_dict.get('in_effective_range', distance < obs_dict.get('weapon_max_range', 500))),
-            'good_aim': aim_error < 0.3,  # Aim within ~17 degrees
-            'enemy_alive': enemy_hp > 0,
-            'ai_wants_fire': should_fire
+
+        aim_limits = {
+            'SNIPER': 0.12,
+            'AR': 0.26,
+            'SMG': 0.48,
         }
-        
-        # Conservative firing - only fire when conditions are good
+        aim_limit = aim_limits.get(weapon, 0.3)
+        bloom = float(obs_dict.get('current_bloom', 0.0) or 0.0)
+        bloom_limits = {
+            'SNIPER': 1.8,
+            'AR': 4.0,
+            'SMG': 4.5,
+        }
+
         should_fire_enhanced = all([
-            fire_conditions['has_line_of_sight'],
-            fire_conditions['in_range'],
-            fire_conditions['good_aim'],
-            fire_conditions['enemy_alive'],
-            fire_conditions['ai_wants_fire'],
+            has_line_of_sight,
+            in_range,
+            aim_error < aim_limit,
+            enemy_hp > 0,
+            bloom <= bloom_limits.get(weapon, 4.0),
         ])
-        
-        # Special cases
-        if distance < 100 and has_line_of_sight:
-            # Close range - fire even with poor aim
-            should_fire_enhanced = should_fire
-            logger.debug(f"🔥 {self.bot_name} close range engagement (dist: {distance:.1f})")
-        elif distance > 400:
-            # Long range - require very good aim
-            should_fire_enhanced = should_fire_enhanced and aim_error < 0.15
-            if should_fire_enhanced:
-                logger.debug(f"🎯 {self.bot_name} precision long range shot (dist: {distance:.1f})")
-        
-        # Don't fire too rapidly (burst control)
+
+        # SMG is intentionally more decisive at close range.
+        if weapon == 'SMG' and distance < min(140.0, max_range) and has_line_of_sight:
+            should_fire_enhanced = enemy_hp > 0 and in_range
+        elif weapon == 'SNIPER':
+            # Sniper should avoid panic-firing while too close or too bloomed.
+            should_fire_enhanced = should_fire_enhanced and distance >= 120.0
+
         if should_fire_enhanced:
-            logger.debug(f"🔫 {self.bot_name} smart firing: LOS={has_line_of_sight}, dist={distance:.1f}, aim_error={aim_error:.2f}")
-        
+            logger.debug(
+                f"🔫 {self.bot_name} {weapon} firing: LOS={has_line_of_sight}, "
+                f"dist={distance:.1f}, aim_error={aim_error:.2f}, bloom={bloom:.2f}"
+            )
+
         return should_fire_enhanced
-    
+
     def _calculate_reward(self, obs_dict, move_x, move_y, fired):
         """Enhanced reward calculation with tactical bonuses"""
         reward = 0.0

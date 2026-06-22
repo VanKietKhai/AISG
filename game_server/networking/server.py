@@ -66,10 +66,15 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
             
             logger.info(f"🤖 Bot registration request: {player_id} ({bot_name})")
             
-            # Parse room info from bot_name hack
+            # Parse room info from bot_name hack.
+            # Backward compatible: name|room|password
+            # Team mode:          name|room|password|team_id|weapon_type[|role]
             parts = bot_name.split('|')
-            if len(parts) == 3:
-                actual_bot_name, room_id, room_password = parts
+            if len(parts) >= 3:
+                actual_bot_name, room_id, room_password = parts[:3]
+                team_id = parts[3].strip() if len(parts) >= 4 and parts[3].strip() else player_id
+                requested_weapon_type = parts[4].strip().upper() if len(parts) >= 5 and parts[4].strip() else None
+                role = parts[5].strip() if len(parts) >= 6 and parts[5].strip() else None
             else:
                 if self.json_logger:
                     self.json_logger.log_bot_registration(
@@ -79,7 +84,15 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                     success=False, message="❌ Invalid room connection format", bot_id=0
                 )
 
-            room_result = self.room_manager.join_room(player_id, actual_bot_name, room_id, room_password)
+            room_result = self.room_manager.join_room(
+                player_id,
+                actual_bot_name,
+                room_id,
+                room_password,
+                team_id=team_id,
+                requested_weapon_type=requested_weapon_type,
+                role=role,
+            )
 
             if not room_result['success']:
                 if self.json_logger:
@@ -100,15 +113,17 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                 room_id,
                 bot_id,
                 weapon_type=room_result['weapon_type'],
+                team_id=room_result.get('team_id', player_id),
+                role=room_result.get('role'),
             )
             players_count = room_result['players_in_room']
-            max_players = room_result.get('max_players', 4)  # fallback to 4
+            max_players = room_result.get('max_players', 8)  # fallback to 8
             
-            if players_count >= 2:
-                status_msg = f"Joined {room_id} ({players_count}/{max_players}) - ⚔️ Combat active!"
+            teams_count = room_result.get('teams_in_room', 1)
+            if teams_count >= 2:
+                status_msg = f"Joined {room_id} ({players_count}/{max_players} bots, {teams_count} teams) - ⚔️ Combat active!"
             else:
-                needed = 2 - players_count
-                status_msg = f"Joined {room_id} ({players_count}/{max_players}) - ⏳ Waiting for {needed} more player(s)..."
+                status_msg = f"Joined {room_id} ({players_count}/{max_players} bots, {teams_count} team) - ⏳ Waiting for another team..."
             # Log successful registration
             if self.json_logger:
                 self.json_logger.log_bot_registration(
@@ -120,9 +135,12 @@ class ArenaBattleServicer(arena_pb2_grpc.ArenaBattleServiceServicer):
                     "bot_id": bot_id,
                     "bot_name": actual_bot_name,
                     "weapon_type": room_result['weapon_type'],
+                    "team_id": room_result.get('team_id', player_id),
+                    "role": room_result.get('role'),
                     "weapon_config_version": room_state.weapon_config_version,
                     "match_seed": room_state.match_seed,
                     "players_in_room": room_result['players_in_room'],
+                    "teams_in_room": room_result.get('teams_in_room', 1),
                     "room_id": room_result['room_id']
                 })
             
